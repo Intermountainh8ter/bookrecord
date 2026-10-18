@@ -11,8 +11,8 @@ Every backtest and every execution test downstream of this tool is only as good 
 ## Usage
 
 ```
-bookrecord record --venue binance --symbol BTCUSDT --out-dir captures --minutes 60
-bookrecord verify captures/binance-btcusdt-<unix>.jsonl.zst
+bookrecord record --venue binance-us --symbol BTCUSDT --out-dir captures --minutes 60
+bookrecord verify captures/binance-us-btcusdt-<unix>.jsonl.zst
 ```
 
 `record` writes `<stem>.jsonl.zst` (meta, snapshot, every raw event with receive time and apply latency, a top-20 book every 500 events, gaps, end summary) and `<stem>.manifest.json` (counts, gaps, resyncs, SHA-256, latency p50 / p90 / p99 / max, the continuity rule in words).
@@ -23,7 +23,8 @@ bookrecord verify captures/binance-btcusdt-<unix>.jsonl.zst
 
 | Venue | Rule enforced | Status |
 | --- | --- | --- |
-| Binance spot | update-ID chain (`U`, `u`) against a REST snapshot | implemented |
+| Binance.US spot (`binance-us`) | update-ID chain (`U`, `u`) against a REST snapshot | implemented, captured |
+| Binance.com spot (`binance`) | same | implemented; answers HTTP 451 from the United States |
 | Kraken | CRC32 checksum of the top ten levels on every update | planned, not stubbed |
 | Coinbase Advanced Trade | sequence numbers on level2 channel | planned, not stubbed |
 
@@ -32,7 +33,11 @@ No keys are needed for any of these public streams.
 ## Results
 
 <!-- RESULTS:START -->
-No capture committed yet.
+| venue | symbol | minutes | events | gaps | resyncs | apply p50 / p99 (µs) | verify consistent | capture sha256 |
+|---|---|---|---|---|---|---|---|---|
+| binance-us | BTCUSDT | 2.0 | 290 | 0 | 0 | 118 / 564 | True | `a13c9339d511e895` |
+
+Rendered from `results/*.manifest.json` and `results/*.verify.json`; the capture file itself is not committed (it is reproducible only in the sense that its hash is recorded).
 <!-- RESULTS:END -->
 
 ## License

@@ -1,0 +1,21 @@
+{
+  "apply_latency_ns": {
+    "p50": 117908,
+    "p90": 176036,
+    "p99": 563769
+  },
+  "capture": "/home/ammo/bench/.scratch/captures/binance-us-btcusdt-1792294638.jsonl.zst",
+  "chain_breaks_in_applied_events": 0,
+  "consistent": true,
+  "end_record": {
+    "dropped_stale": 0,
+    "events": 290,
+    "gaps": 0,
+    "resyncs": 0
+  },
+  "end_record_matches": true,
+  "events": 290,
+  "gaps_logged": 0,
+  "gaps_well_formed": 0,
+  "snapshots": 1
+}

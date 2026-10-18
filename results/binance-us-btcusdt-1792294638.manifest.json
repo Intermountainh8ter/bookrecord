@@ -1,0 +1,22 @@
+{
+  "apply_latency_ns": {
+    "max": 801233,
+    "p50": 117908,
+    "p90": 176036,
+    "p99": 563769
+  },
+  "bytes": 25809,
+  "continuity_rule": "Binance diff-depth: first event U <= lastUpdateId+1 <= u, then each U == previous u + 1; otherwise gap + resync from a fresh REST snapshot",
+  "dropped_stale": 0,
+  "ended_unix_ns": 1792294759017900385,
+  "events": 290,
+  "file": "binance-us-btcusdt-1792294638.jsonl.zst",
+  "gaps": 0,
+  "lines": 293,
+  "resyncs": 0,
+  "sha256": "a13c9339d511e895c140309121dddbaf4b6bbf959689e3bf5c8818bf656b65e4",
+  "started_unix_ns": 1792294638001481387,
+  "symbol": "BTCUSDT",
+  "tool": "bookrecord 0.1.0",
+  "venue": "binance-us"
+}

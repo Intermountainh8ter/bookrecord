@@ -32,7 +32,7 @@ struct Cli {
 enum Cmd {
     /// Record one symbol's book from one venue for a fixed number of minutes.
     Record {
-        /// binance (kraken and coinbase are planned, not implemented)
+        /// binance | binance-us (kraken and coinbase are planned, not implemented)
         #[arg(long)]
         venue: String,
         /// Exchange symbol, e.g. BTCUSDT
@@ -133,8 +133,18 @@ struct BinanceDepthEvent {
     asks: Vec<(String, String)>,
 }
 
-fn binance_snapshot(symbol: &str) -> anyhow::Result<BinanceSnapshot> {
-    let url = format!("https://api.binance.com/api/v3/depth?symbol={symbol}&limit=1000");
+/// Binance-family hosts share one API shape. Binance.com and its spot testnet answer HTTP 451
+/// from the United States; Binance.US does not.
+fn binance_hosts(venue: &str) -> Option<(&'static str, &'static str)> {
+    match venue {
+        "binance" => Some(("https://api.binance.com", "wss://stream.binance.com:9443")),
+        "binance-us" => Some(("https://api.binance.us", "wss://stream.binance.us:9443")),
+        _ => None,
+    }
+}
+
+fn binance_snapshot(rest: &str, symbol: &str) -> anyhow::Result<BinanceSnapshot> {
+    let url = format!("{rest}/api/v3/depth?symbol={symbol}&limit=1000");
     Ok(ureq::get(&url).timeout(Duration::from_secs(20)).call()?.into_json()?)
 }
 
@@ -160,22 +170,24 @@ impl Writer {
     }
 }
 
-async fn record_binance(symbol: String, out_dir: PathBuf, minutes: u64, top_every: u64, top_levels: usize) -> anyhow::Result<()> {
+async fn record_binance(venue: &str, symbol: String, out_dir: PathBuf, minutes: u64, top_every: u64, top_levels: usize) -> anyhow::Result<()> {
+    let (rest, ws_base) = binance_hosts(venue).ok_or_else(|| anyhow::anyhow!("unknown binance venue {venue}"))?;
+    let rest = rest.to_string();
     std::fs::create_dir_all(&out_dir)?;
     let started = now_ns();
-    let stem = format!("binance-{}-{}", symbol.to_lowercase(), started / 1_000_000_000);
+    let stem = format!("{venue}-{}-{}", symbol.to_lowercase(), started / 1_000_000_000);
     let path = out_dir.join(format!("{stem}.jsonl.zst"));
     let mut w = Writer::new(&path)?;
-    w.write(&Rec::Meta { venue: "binance".into(), symbol: symbol.clone(), started_unix_ns: started, tool: format!("bookrecord {}", env!("CARGO_PKG_VERSION")) })?;
+    w.write(&Rec::Meta { venue: venue.to_string(), symbol: symbol.clone(), started_unix_ns: started, tool: format!("bookrecord {}", env!("CARGO_PKG_VERSION")) })?;
 
-    let url = format!("wss://stream.binance.com:9443/ws/{}@depth@100ms", symbol.to_lowercase());
+    let url = format!("{ws_base}/ws/{}@depth@100ms", symbol.to_lowercase());
     let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
     let (_, mut rx) = ws.split();
     eprintln!("connected {url}");
 
     // Snapshot after the stream is open so buffered events bracket it.
-    let sym = symbol.clone();
-    let snap = tokio::task::spawn_blocking(move || binance_snapshot(&sym)).await??;
+    let (sym, r) = (symbol.clone(), rest.clone());
+    let snap = tokio::task::spawn_blocking(move || binance_snapshot(&r, &sym)).await??;
     let snap_recv = now_ns();
     let mut book = Book::default();
     book.load(&snap.bids, &snap.asks)?;
@@ -215,8 +227,8 @@ async fn record_binance(symbol: String, out_dir: PathBuf, minutes: u64, top_ever
                 // Snapshot is older than the buffered stream: resync.
                 gaps += 1;
                 w.write(&Rec::Gap { recv_ns: recv, expected_first_id: last_id + 1, got_first_id: ev.first_id })?;
-                let sym = symbol.clone();
-                let s = tokio::task::spawn_blocking(move || binance_snapshot(&sym)).await??;
+                let (sym, r) = (symbol.clone(), rest.clone());
+                let s = tokio::task::spawn_blocking(move || binance_snapshot(&r, &sym)).await??;
                 book.load(&s.bids, &s.asks)?;
                 w.write(&Rec::Snapshot { recv_ns: now_ns(), last_update_id: s.last_update_id, bids: s.bids.clone(), asks: s.asks.clone() })?;
                 last_id = s.last_update_id;
@@ -227,8 +239,8 @@ async fn record_binance(symbol: String, out_dir: PathBuf, minutes: u64, top_ever
         } else if ev.first_id != last_id + 1 {
             gaps += 1;
             w.write(&Rec::Gap { recv_ns: recv, expected_first_id: last_id + 1, got_first_id: ev.first_id })?;
-            let sym = symbol.clone();
-            let s = tokio::task::spawn_blocking(move || binance_snapshot(&sym)).await??;
+            let (sym, r) = (symbol.clone(), rest.clone());
+            let s = tokio::task::spawn_blocking(move || binance_snapshot(&r, &sym)).await??;
             book.load(&s.bids, &s.asks)?;
             w.write(&Rec::Snapshot { recv_ns: now_ns(), last_update_id: s.last_update_id, bids: s.bids.clone(), asks: s.asks.clone() })?;
             last_id = s.last_update_id;
@@ -262,7 +274,7 @@ async fn record_binance(symbol: String, out_dir: PathBuf, minutes: u64, top_ever
     };
     let manifest = serde_json::json!({
         "tool": format!("bookrecord {}", env!("CARGO_PKG_VERSION")),
-        "venue": "binance", "symbol": symbol, "file": path.file_name().and_then(|s| s.to_str()),
+        "venue": venue, "symbol": symbol, "file": path.file_name().and_then(|s| s.to_str()),
         "sha256": sha,
         "bytes": bytes.len(), "lines": lines, "started_unix_ns": started, "ended_unix_ns": now_ns(),
         "events": events, "gaps": gaps, "resyncs": resyncs, "dropped_stale": dropped_stale,
@@ -331,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Cmd::Record { venue, symbol, out_dir, minutes, top_every, top_levels } => match venue.as_str() {
-            "binance" => record_binance(symbol, out_dir, minutes, top_every, top_levels).await,
+            "binance" | "binance-us" => record_binance(&venue, symbol, out_dir, minutes, top_every, top_levels).await,
             "kraken" | "coinbase" => anyhow::bail!("{venue}: adapter not implemented yet (planned: Kraken v2 CRC32 checksum, Coinbase level2 sequence)"),
             other => anyhow::bail!("unknown venue {other}"),
         },
