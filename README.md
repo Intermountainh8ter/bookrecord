@@ -25,7 +25,7 @@ bookrecord verify captures/binance-us-btcusdt-<unix>.jsonl.zst
 | --- | --- | --- |
 | Binance.US spot (`binance-us`) | update-ID chain (`U`, `u`) against a REST snapshot | implemented, captured |
 | Binance.com spot (`binance`) | same | implemented; answers HTTP 451 from the United States |
-| Kraken | CRC32 checksum of the top ten levels on every update | planned, not stubbed |
+| Kraken (`kraken`, symbol like `BTC/USD`) | CRC32 checksum of the top ten levels on every update, resubscribe on mismatch | implemented, captured |
 | Coinbase Advanced Trade | sequence numbers on level2 channel | planned, not stubbed |
 
 No keys are needed for any of these public streams.
@@ -36,6 +36,7 @@ No keys are needed for any of these public streams.
 | venue | symbol | minutes | events | gaps | resyncs | apply p50 / p99 (µs) | verify consistent | capture sha256 |
 |---|---|---|---|---|---|---|---|---|
 | binance-us | BTCUSDT | 2.0 | 290 | 0 | 0 | 118 / 564 | true | `a13c9339d511e895` |
+| kraken | BTC/USD | 2.0 | 1417 | 0 | 0 | 394 / 700 | true | `eba8119e3ddb710c` |
 
 Rendered by `bookrecord report` from `results/*.manifest.json` and `results/*.verify.json`; capture files are not committed, their hashes are.
 <!-- RESULTS:END -->

@@ -32,7 +32,7 @@ struct Cli {
 enum Cmd {
     /// Record one symbol's book from one venue for a fixed number of minutes.
     Record {
-        /// binance | binance-us (kraken and coinbase are planned, not implemented)
+        /// binance | binance-us | kraken (symbol like BTC/USD) ; coinbase is planned, not implemented
         #[arg(long)]
         venue: String,
         /// Exchange symbol, e.g. BTCUSDT
@@ -330,6 +330,147 @@ async fn record_binance(venue: &str, symbol: String, out_dir: PathBuf, minutes: 
     Ok(())
 }
 
+
+// ---------- Kraken v2 (CRC32 checksum) ----------
+
+#[derive(Deserialize)]
+struct KrakenPairInfo {
+    pair_decimals: u32,
+    lot_decimals: u32,
+}
+
+fn kraken_precision(symbol: &str) -> anyhow::Result<(u32, u32)> {
+    // "BTC/USD" -> REST pair query "XBTUSD" works via the altname search.
+    let alt = symbol.replace('/', "").replace("BTC", "XBT");
+    let v: serde_json::Value = ureq::get(&format!("https://api.kraken.com/0/public/AssetPairs?pair={alt}")).timeout(Duration::from_secs(20)).call()?.into_json()?;
+    let result = v["result"].as_object().ok_or_else(|| anyhow::anyhow!("AssetPairs: {}", v["error"]))?;
+    let (_, info) = result.iter().next().ok_or_else(|| anyhow::anyhow!("AssetPairs: no pair for {symbol}"))?;
+    let info: KrakenPairInfo = serde_json::from_value(info.clone())?;
+    Ok((info.pair_decimals, info.lot_decimals))
+}
+
+/// Kraken's book checksum: for the top ten asks (ascending) then top ten bids (descending),
+/// format price and qty with the pair's decimals, drop the decimal point and leading zeros,
+/// concatenate everything, CRC32.
+fn kraken_checksum(book: &Book, price_dec: u32, qty_dec: u32) -> u32 {
+    let fmt = |d: &Decimal, dec: u32| -> String {
+        let s = format!("{:.*}", dec as usize, d);
+        let s = s.replace('.', "");
+        let t = s.trim_start_matches('0');
+        if t.is_empty() { "0".to_string() } else { t.to_string() }
+    };
+    let mut buf = String::new();
+    for (p, q) in book.asks.iter().take(10) {
+        buf.push_str(&fmt(p, price_dec));
+        buf.push_str(&fmt(q, qty_dec));
+    }
+    for (p, q) in book.bids.iter().rev().take(10) {
+        buf.push_str(&fmt(p, price_dec));
+        buf.push_str(&fmt(q, qty_dec));
+    }
+    crc32fast::hash(buf.as_bytes())
+}
+
+fn kraken_levels(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.as_array().map(|a| a.iter().map(|l| (l["price"].to_string(), l["qty"].to_string())).collect()).unwrap_or_default()
+}
+
+async fn record_kraken(symbol: String, out_dir: PathBuf, minutes: u64, top_every: u64, top_levels: usize) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&out_dir)?;
+    let (price_dec, qty_dec) = kraken_precision(&symbol)?;
+    let started = now_ns();
+    let stem = format!("kraken-{}-{}", symbol.to_lowercase().replace('/', ""), started / 1_000_000_000);
+    let path = out_dir.join(format!("{stem}.jsonl.zst"));
+    let mut w = Writer::new(&path)?;
+    w.write(&Rec::Meta { venue: "kraken".into(), symbol: symbol.clone(), started_unix_ns: started, tool: format!("bookrecord {}", env!("CARGO_PKG_VERSION")) })?;
+
+    let (ws, _) = tokio_tungstenite::connect_async("wss://ws.kraken.com/v2").await?;
+    let (mut tx, mut rx) = ws.split();
+    use futures_util::SinkExt;
+    let sub = serde_json::json!({"method": "subscribe", "params": {"channel": "book", "symbol": [symbol], "depth": 10, "snapshot": true}});
+    tx.send(tokio_tungstenite::tungstenite::Message::Text(sub.to_string().into())).await?;
+    eprintln!("connected wss://ws.kraken.com/v2, depth 10, precision {price_dec}/{qty_dec}");
+
+    let mut book = Book::default();
+    let deadline = Instant::now() + Duration::from_secs(minutes * 60);
+    let (mut events, mut gaps, mut resyncs, mut snapshots) = (0u64, 0u64, 0u64, 0u64);
+    let mut lat: Vec<u64> = Vec::new();
+    let mut seq: u64 = 0;
+    loop {
+        let msg = tokio::select! {
+            m = rx.next() => m,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => break,
+            _ = tokio::signal::ctrl_c() => { eprintln!("interrupted"); break; }
+        };
+        let Some(msg) = msg else { eprintln!("stream closed"); break };
+        let msg = msg?;
+        let recv = now_ns();
+        let t0 = Instant::now();
+        let text = match msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t,
+            tokio_tungstenite::tungstenite::Message::Close(_) => break,
+            _ => continue,
+        };
+        let raw: serde_json::Value = serde_json::from_str(&text)?;
+        if raw["channel"] != "book" { continue; }
+        let kind = raw["type"].as_str().unwrap_or("");
+        let data = &raw["data"][0];
+        let bids = kraken_levels(&data["bids"]);
+        let asks = kraken_levels(&data["asks"]);
+        let expected = data["checksum"].as_u64().unwrap_or(0) as u32;
+        if kind == "snapshot" {
+            book.load(&bids, &asks)?;
+            snapshots += 1;
+            w.write(&Rec::Snapshot { recv_ns: recv, last_update_id: seq, bids: bids.clone(), asks: asks.clone() })?;
+            continue;
+        }
+        book.apply(&bids, &asks)?;
+        // Kraken keeps the book at the subscribed depth: trim anything beyond 10 levels.
+        while book.asks.len() > 10 { let k = *book.asks.keys().next_back().unwrap(); book.asks.remove(&k); }
+        while book.bids.len() > 10 { let k = *book.bids.keys().next().unwrap(); book.bids.remove(&k); }
+        let got = kraken_checksum(&book, price_dec, qty_dec);
+        seq += 1;
+        if got != expected {
+            gaps += 1;
+            w.write(&Rec::Gap { recv_ns: recv, expected_first_id: expected as u64, got_first_id: got as u64 })?;
+            // Resync: unsubscribe and resubscribe for a fresh snapshot.
+            let unsub = serde_json::json!({"method": "unsubscribe", "params": {"channel": "book", "symbol": [symbol.clone()], "depth": 10}});
+            tx.send(tokio_tungstenite::tungstenite::Message::Text(unsub.to_string().into())).await?;
+            tx.send(tokio_tungstenite::tungstenite::Message::Text(sub.to_string().into())).await?;
+            resyncs += 1;
+            continue;
+        }
+        anyhow::ensure!(!book.crossed(), "book crossed at update {seq}");
+        let apply_ns = t0.elapsed().as_nanos() as u64;
+        lat.push(apply_ns);
+        events += 1;
+        w.write(&Rec::Event { recv_ns: recv, apply_ns, first_id: seq, last_id: seq, event_time_ms: 0, n_bids: bids.len(), n_asks: asks.len(), raw })?;
+        if events % top_every == 0 {
+            let (b, a) = book.top(top_levels);
+            w.write(&Rec::Top { recv_ns: now_ns(), last_id: seq, bids: b, asks: a })?;
+            eprintln!("{events} updates, {gaps} checksum mismatches");
+        }
+    }
+    w.write(&Rec::End { recv_ns: now_ns(), events, gaps, resyncs, dropped_stale: 0 })?;
+    let lines = w.lines;
+    w.finish()?;
+    lat.sort_unstable();
+    let pct = |q: f64| -> u64 { if lat.is_empty() { 0 } else { lat[((lat.len() - 1) as f64 * q).round() as usize] } };
+    let bytes = std::fs::read(&path)?;
+    let sha = { use sha2::Digest; hex::encode(sha2::Sha256::digest(&bytes)) };
+    let manifest = serde_json::json!({
+        "tool": format!("bookrecord {}", env!("CARGO_PKG_VERSION")),
+        "venue": "kraken", "symbol": symbol, "file": path.file_name().and_then(|s| s.to_str()), "sha256": sha,
+        "bytes": bytes.len(), "lines": lines, "started_unix_ns": started, "ended_unix_ns": now_ns(),
+        "events": events, "gaps": gaps, "resyncs": resyncs, "dropped_stale": 0, "snapshots": snapshots,
+        "apply_latency_ns": { "p50": pct(0.5), "p90": pct(0.9), "p99": pct(0.99), "max": lat.last().copied().unwrap_or(0) },
+        "continuity_rule": "Kraken v2 book: CRC32 of the top-10 asks then bids (price and qty at pair precision, decimal point and leading zeros removed) must equal the message checksum; a mismatch is a gap and triggers resubscribe"
+    });
+    std::fs::write(out_dir.join(format!("{stem}.manifest.json")), serde_json::to_string_pretty(&manifest)?)?;
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
+}
+
 fn verify(capture: &PathBuf) -> anyhow::Result<()> {
     let f = std::fs::File::open(capture)?;
     let dec = zstd::Decoder::new(f)?;
@@ -388,7 +529,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Cmd::Record { venue, symbol, out_dir, minutes, top_every, top_levels } => match venue.as_str() {
             "binance" | "binance-us" => record_binance(&venue, symbol, out_dir, minutes, top_every, top_levels).await,
-            "kraken" | "coinbase" => anyhow::bail!("{venue}: adapter not implemented yet (planned: Kraken v2 CRC32 checksum, Coinbase level2 sequence)"),
+            "kraken" => record_kraken(symbol, out_dir, minutes, top_every, top_levels).await,
+            "coinbase" => anyhow::bail!("coinbase: adapter not implemented yet (planned: level2 sequence numbers)"),
             other => anyhow::bail!("unknown venue {other}"),
         },
         Cmd::Verify { capture } => verify(&capture),
@@ -409,6 +551,15 @@ mod tests {
         assert!(!b.crossed());
         b.apply(&[("102".into(), "1".into())], &[]).unwrap();
         assert!(b.crossed());
+    }
+
+    #[test]
+    fn kraken_checksum_matches_a_hand_computed_case() {
+        // Kraken docs example shape: price 45283.5 qty 0.10000000 -> "452835" + "10000000".
+        let mut b = Book::default();
+        b.load(&[("45283.4".into(), "0.20000000".into())], &[("45283.5".into(), "0.10000000".into())]).unwrap();
+        let expect = crc32fast::hash(b"4528351000000045283420000000");
+        assert_eq!(kraken_checksum(&b, 1, 8), expect);
     }
 
     #[test]

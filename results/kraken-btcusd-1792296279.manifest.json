@@ -1,0 +1,23 @@
+{
+  "apply_latency_ns": {
+    "max": 768321,
+    "p50": 393514,
+    "p90": 486634,
+    "p99": 699534
+  },
+  "bytes": 54039,
+  "continuity_rule": "Kraken v2 book: CRC32 of the top-10 asks then bids (price and qty at pair precision, decimal point and leading zeros removed) must equal the message checksum; a mismatch is a gap and triggers resubscribe",
+  "dropped_stale": 0,
+  "ended_unix_ns": 1792296400722537792,
+  "events": 1417,
+  "file": "kraken-btcusd-1792296279.jsonl.zst",
+  "gaps": 0,
+  "lines": 1422,
+  "resyncs": 0,
+  "sha256": "eba8119e3ddb710c1c3fc7d6cc7f65ea73d9a61ef7e8c3e24b3f90e66eff4501",
+  "snapshots": 1,
+  "started_unix_ns": 1792296279421440518,
+  "symbol": "BTC/USD",
+  "tool": "bookrecord 0.1.0",
+  "venue": "kraken"
+}
