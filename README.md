@@ -35,9 +35,9 @@ No keys are needed for any of these public streams.
 <!-- RESULTS:START -->
 | venue | symbol | minutes | events | gaps | resyncs | apply p50 / p99 (µs) | verify consistent | capture sha256 |
 |---|---|---|---|---|---|---|---|---|
-| binance-us | BTCUSDT | 2.0 | 290 | 0 | 0 | 118 / 564 | True | `a13c9339d511e895` |
+| binance-us | BTCUSDT | 2.0 | 290 | 0 | 0 | 118 / 564 | true | `a13c9339d511e895` |
 
-Rendered from `results/*.manifest.json` and `results/*.verify.json`; the capture file itself is not committed (it is reproducible only in the sense that its hash is recorded).
+Rendered by `bookrecord report` from `results/*.manifest.json` and `results/*.verify.json`; capture files are not committed, their hashes are.
 <!-- RESULTS:END -->
 
 ## License

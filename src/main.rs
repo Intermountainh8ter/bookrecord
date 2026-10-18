@@ -52,6 +52,50 @@ enum Cmd {
     Verify {
         capture: PathBuf,
     },
+    /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
+    Report {
+        #[arg(long, default_value = "results")]
+        dir: PathBuf,
+        #[arg(long, default_value = "README.md")]
+        readme: PathBuf,
+    },
+}
+
+fn report(dir: &PathBuf, readme: &PathBuf) -> anyhow::Result<()> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".manifest.json")))
+        .collect();
+    files.sort();
+    anyhow::ensure!(!files.is_empty(), "no *.manifest.json in {}", dir.display());
+    let mut t = String::from("| venue | symbol | minutes | events | gaps | resyncs | apply p50 / p99 (µs) | verify consistent | capture sha256 |\n|---|---|---|---|---|---|---|---|---|\n");
+    for f in &files {
+        let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f)?)?;
+        let vpath = PathBuf::from(f.to_string_lossy().replace(".manifest.json", ".verify.json"));
+        let consistent = match std::fs::read_to_string(&vpath) {
+            Ok(s) => serde_json::from_str::<serde_json::Value>(&s)?["consistent"].as_bool().map(|b| b.to_string()).unwrap_or("?".into()),
+            Err(_) => "no verify file".into(),
+        };
+        let g = |k: &str| m.get(k).ok_or_else(|| anyhow::anyhow!("{} missing {k}", f.display()));
+        let minutes = (g("ended_unix_ns")?.as_u64().unwrap_or(0).saturating_sub(g("started_unix_ns")?.as_u64().unwrap_or(0))) as f64 / 60e9;
+        let lat = g("apply_latency_ns")?;
+        t.push_str(&format!(
+            "| {} | {} | {:.1} | {} | {} | {} | {:.0} / {:.0} | {} | `{}` |\n",
+            g("venue")?.as_str().unwrap_or("?"), g("symbol")?.as_str().unwrap_or("?"), minutes, g("events")?, g("gaps")?, g("resyncs")?,
+            lat["p50"].as_f64().unwrap_or(0.0) / 1000.0, lat["p99"].as_f64().unwrap_or(0.0) / 1000.0, consistent,
+            &g("sha256")?.as_str().unwrap_or("?")[..16]
+        ));
+    }
+    t.push_str("\nRendered by `bookrecord report` from `results/*.manifest.json` and `results/*.verify.json`; capture files are not committed, their hashes are.\n");
+    const START: &str = "<!-- RESULTS:START -->";
+    const END: &str = "<!-- RESULTS:END -->";
+    let text = std::fs::read_to_string(readme)?;
+    let s = text.find(START).ok_or_else(|| anyhow::anyhow!("README missing {START}"))?;
+    let e = text.find(END).ok_or_else(|| anyhow::anyhow!("README missing {END}"))?;
+    anyhow::ensure!(s < e);
+    std::fs::write(readme, format!("{}\n{}{}", &text[..s + START.len()], t, &text[e..]))?;
+    print!("{t}");
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -348,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown venue {other}"),
         },
         Cmd::Verify { capture } => verify(&capture),
+        Cmd::Report { dir, readme } => report(&dir, &readme),
     }
 }
 
