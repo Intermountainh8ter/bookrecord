@@ -2,7 +2,7 @@
 
 **Record L2 order books from exchange websocket streams, and prove the recording is whole.** Snapshot plus diff stream, the exchange's own continuity rule enforced on every event, a logged resync on any gap, zstd-compressed JSON Lines on disk with a manifest, and the time from frame receipt to book applied measured on every event. `verify` re-checks a capture independently of the live run.
 
-![language: Rust](https://img.shields.io/badge/language-Rust-blue) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![status: Binance adapter live](https://img.shields.io/badge/venues-Binance%20spot-informational)
+![language: Rust](https://img.shields.io/badge/language-Rust-blue) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![status: Binance, Kraken, Coinbase adapters live](https://img.shields.io/badge/venues-Binance%20spot-informational)
 
 ## Why
 
@@ -26,7 +26,7 @@ bookrecord verify captures/binance-us-btcusdt-<unix>.jsonl.zst
 | Binance.US spot (`binance-us`) | update-ID chain (`U`, `u`) against a REST snapshot | implemented, captured |
 | Binance.com spot (`binance`) | same | implemented; answers HTTP 451 from the United States |
 | Kraken (`kraken`, symbol like `BTC/USD`) | CRC32 checksum of the top ten levels on every update, resubscribe on mismatch | implemented, captured |
-| Coinbase Advanced Trade | sequence numbers on level2 channel | planned, not stubbed |
+| Coinbase Advanced Trade (`coinbase`, symbol like `BTC-USD`) | per-connection `sequence_num` must advance by one on every message; a skipped number is a gap and triggers resubscribe for a fresh snapshot | implemented, captured |
 
 No keys are needed for any of these public streams.
 
@@ -36,6 +36,7 @@ No keys are needed for any of these public streams.
 | venue | symbol | minutes | events | gaps | resyncs | apply p50 / p99 (µs) | verify consistent | capture sha256 |
 |---|---|---|---|---|---|---|---|---|
 | binance-us | BTCUSDT | 2.0 | 290 | 0 | 0 | 118 / 564 | true | `a13c9339d511e895` |
+| coinbase | BTC-USD | 2.0 | 2312 | 0 | 0 | 518 / 4012 | true | `aa9f404f48b8e866` |
 | kraken | BTC/USD | 2.0 | 1417 | 0 | 0 | 394 / 700 | true | `eba8119e3ddb710c` |
 
 Rendered by `bookrecord report` from `results/*.manifest.json` and `results/*.verify.json`; capture files are not committed, their hashes are.

@@ -32,7 +32,7 @@ struct Cli {
 enum Cmd {
     /// Record one symbol's book from one venue for a fixed number of minutes.
     Record {
-        /// binance | binance-us | kraken (symbol like BTC/USD) ; coinbase is planned, not implemented
+        /// binance | binance-us | kraken (symbol like BTC/USD) | coinbase (symbol like BTC-USD)
         #[arg(long)]
         venue: String,
         /// Exchange symbol, e.g. BTCUSDT
@@ -471,6 +471,162 @@ async fn record_kraken(symbol: String, out_dir: PathBuf, minutes: u64, top_every
     Ok(())
 }
 
+// ---------- Coinbase Advanced Trade (level2, per-connection sequence numbers) ----------
+
+/// Coinbase's level2 channel sends a `snapshot` event on subscribe and `update` events after it,
+/// every message carrying a `sequence_num` that increments by one per message on the connection
+/// (across channels, including the subscription acknowledgement). A skipped number is a dropped
+/// message; the documented recovery is to resubscribe for a fresh snapshot. Sides are `bid` and
+/// `offer`; a `new_quantity` of 0 removes the level.
+fn coinbase_levels(updates: &serde_json::Value) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let (mut bids, mut asks) = (Vec::new(), Vec::new());
+    if let Some(a) = updates.as_array() {
+        for u in a {
+            let px = u["price_level"].as_str().unwrap_or("0").to_string();
+            let qty = u["new_quantity"].as_str().unwrap_or("0").to_string();
+            match u["side"].as_str() {
+                Some("bid") => bids.push((px, qty)),
+                Some("offer") | Some("ask") => asks.push((px, qty)),
+                _ => {}
+            }
+        }
+    }
+    (bids, asks)
+}
+
+async fn record_coinbase(symbol: String, out_dir: PathBuf, minutes: u64, top_every: u64, top_levels: usize) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&out_dir)?;
+    let started = now_ns();
+    let stem = format!("coinbase-{}-{}", symbol.to_lowercase().replace('-', ""), started / 1_000_000_000);
+    let path = out_dir.join(format!("{stem}.jsonl.zst"));
+    let mut w = Writer::new(&path)?;
+    w.write(&Rec::Meta { venue: "coinbase".into(), symbol: symbol.clone(), started_unix_ns: started, tool: format!("bookrecord {}", env!("CARGO_PKG_VERSION")) })?;
+
+    let url = "wss://advanced-trade-ws.coinbase.com";
+    let (ws, _) = tokio_tungstenite::connect_async(url).await?;
+    let (mut tx, mut rx) = ws.split();
+    use futures_util::SinkExt;
+    let sub = serde_json::json!({"type": "subscribe", "product_ids": [symbol], "channel": "level2"});
+    let unsub = serde_json::json!({"type": "unsubscribe", "product_ids": [symbol], "channel": "level2"});
+    tx.send(tokio_tungstenite::tungstenite::Message::Text(sub.to_string().into())).await?;
+    eprintln!("connected {url}, level2 {symbol}");
+
+    let mut book = Book::default();
+    let deadline = Instant::now() + Duration::from_secs(minutes * 60);
+    let (mut events, mut gaps, mut resyncs, mut snapshots, mut skipped_resync) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut lat: Vec<u64> = Vec::new();
+    // `last_seq` is the sequence number of the last message in the recorded chain; `synced` is
+    // false between a gap and the next snapshot, when messages are skipped rather than recorded.
+    let mut last_seq: Option<u64> = None;
+    let mut synced = false;
+    loop {
+        let msg = tokio::select! {
+            m = rx.next() => m,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => break,
+            _ = tokio::signal::ctrl_c() => { eprintln!("interrupted"); break; }
+        };
+        let Some(msg) = msg else { eprintln!("stream closed"); break };
+        let msg = msg?;
+        let recv = now_ns();
+        let t0 = Instant::now();
+        let text = match msg {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t,
+            tokio_tungstenite::tungstenite::Message::Close(_) => break,
+            _ => continue,
+        };
+        let raw: serde_json::Value = serde_json::from_str(&text)?;
+        if raw["type"] == "error" {
+            anyhow::bail!("coinbase error message: {}", raw["message"]);
+        }
+        let Some(seq) = raw["sequence_num"].as_u64() else { continue };
+        let channel = raw["channel"].as_str().unwrap_or("");
+        let is_l2 = channel == "l2_data";
+        let ev = if is_l2 { &raw["events"][0] } else { &serde_json::Value::Null };
+        let kind = ev["type"].as_str().unwrap_or("");
+
+        if is_l2 && kind == "snapshot" {
+            let (bids, asks) = coinbase_levels(&ev["updates"]);
+            book.load(&bids, &asks)?;
+            snapshots += 1;
+            w.write(&Rec::Snapshot { recv_ns: recv, last_update_id: seq, bids, asks })?;
+            last_seq = Some(seq);
+            synced = true;
+            continue;
+        }
+        if !synced {
+            // Before the first snapshot, or between a gap and the resubscribed snapshot.
+            if last_seq.is_some() { skipped_resync += 1; }
+            continue;
+        }
+        if let Some(prev) = last_seq {
+            if seq != prev + 1 {
+                gaps += 1;
+                w.write(&Rec::Gap { recv_ns: recv, expected_first_id: prev + 1, got_first_id: seq })?;
+                tx.send(tokio_tungstenite::tungstenite::Message::Text(unsub.to_string().into())).await?;
+                tx.send(tokio_tungstenite::tungstenite::Message::Text(sub.to_string().into())).await?;
+                resyncs += 1;
+                synced = false;
+                continue;
+            }
+        }
+        let (bids, asks) = if is_l2 { coinbase_levels(&ev["updates"]) } else { (Vec::new(), Vec::new()) };
+        if is_l2 {
+            book.apply(&bids, &asks)?;
+            anyhow::ensure!(!book.crossed(), "book crossed at sequence {seq}");
+        }
+        last_seq = Some(seq);
+        let apply_ns = t0.elapsed().as_nanos() as u64;
+        lat.push(apply_ns);
+        events += 1;
+        let event_time_ms = raw["timestamp"].as_str().and_then(rfc3339_to_ms).unwrap_or(0);
+        w.write(&Rec::Event { recv_ns: recv, apply_ns, first_id: seq, last_id: seq, event_time_ms, n_bids: bids.len(), n_asks: asks.len(), raw })?;
+        if events % top_every == 0 {
+            let (b, a) = book.top(top_levels);
+            w.write(&Rec::Top { recv_ns: now_ns(), last_id: seq, bids: b, asks: a })?;
+            eprintln!("{events} messages, {gaps} sequence gaps, best bid/ask {} / {}", book.bids.keys().next_back().map(|d| d.to_string()).unwrap_or_default(), book.asks.keys().next().map(|d| d.to_string()).unwrap_or_default());
+        }
+    }
+    w.write(&Rec::End { recv_ns: now_ns(), events, gaps, resyncs, dropped_stale: skipped_resync })?;
+    let lines = w.lines;
+    w.finish()?;
+    lat.sort_unstable();
+    let pct = |q: f64| -> u64 { if lat.is_empty() { 0 } else { lat[((lat.len() - 1) as f64 * q).round() as usize] } };
+    let bytes = std::fs::read(&path)?;
+    let sha = { use sha2::Digest; hex::encode(sha2::Sha256::digest(&bytes)) };
+    let manifest = serde_json::json!({
+        "tool": format!("bookrecord {}", env!("CARGO_PKG_VERSION")),
+        "venue": "coinbase", "symbol": symbol, "file": path.file_name().and_then(|s| s.to_str()), "sha256": sha,
+        "bytes": bytes.len(), "lines": lines, "started_unix_ns": started, "ended_unix_ns": now_ns(),
+        "events": events, "gaps": gaps, "resyncs": resyncs, "dropped_stale": skipped_resync, "snapshots": snapshots,
+        "apply_latency_ns": { "p50": pct(0.5), "p90": pct(0.9), "p99": pct(0.99), "max": lat.last().copied().unwrap_or(0) },
+        "continuity_rule": "Coinbase Advanced Trade level2: every message's sequence_num must equal the previous message's plus one (the chain includes non-book messages on the connection); a skipped number is a gap, triggers unsubscribe/resubscribe, and messages are skipped (counted as dropped_stale) until the fresh snapshot"
+    });
+    std::fs::write(out_dir.join(format!("{stem}.manifest.json")), serde_json::to_string_pretty(&manifest)?)?;
+    println!("{}", serde_json::to_string_pretty(&manifest)?);
+    Ok(())
+}
+
+/// Parse an RFC 3339 UTC timestamp with optional fractional seconds into Unix milliseconds
+/// without a date crate: `2026-10-19T15:04:05.123456Z`. Anything else returns None.
+fn rfc3339_to_ms(s: &str) -> Option<u64> {
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let (hms, frac) = match time.split_once('.') { Some((a, f)) => (a, f), None => (time, "") };
+    let mut t = hms.split(':');
+    let (h, mi, sec): (u64, u64, u64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    let ms: u64 = if frac.is_empty() { 0 } else { format!("{:0<3}", &frac[..frac.len().min(3)]).parse().ok()? };
+    // Days from civil date (Howard Hinnant's algorithm).
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some((days as u64 * 86400 + h * 3600 + mi * 60 + sec) * 1000 + ms)
+}
+
 fn verify(capture: &PathBuf) -> anyhow::Result<()> {
     let f = std::fs::File::open(capture)?;
     let dec = zstd::Decoder::new(f)?;
@@ -530,7 +686,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Record { venue, symbol, out_dir, minutes, top_every, top_levels } => match venue.as_str() {
             "binance" | "binance-us" => record_binance(&venue, symbol, out_dir, minutes, top_every, top_levels).await,
             "kraken" => record_kraken(symbol, out_dir, minutes, top_every, top_levels).await,
-            "coinbase" => anyhow::bail!("coinbase: adapter not implemented yet (planned: level2 sequence numbers)"),
+            "coinbase" => record_coinbase(symbol, out_dir, minutes, top_every, top_levels).await,
             other => anyhow::bail!("unknown venue {other}"),
         },
         Cmd::Verify { capture } => verify(&capture),
@@ -551,6 +707,14 @@ mod tests {
         assert!(!b.crossed());
         b.apply(&[("102".into(), "1".into())], &[]).unwrap();
         assert!(b.crossed());
+    }
+
+    #[test]
+    fn rfc3339_parses_to_unix_ms() {
+        assert_eq!(rfc3339_to_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_to_ms("2026-10-19T15:04:05.123456Z"), Some(1792422245123));
+        assert_eq!(rfc3339_to_ms("2024-02-29T23:59:59.5Z"), Some(1709251199500));
+        assert_eq!(rfc3339_to_ms("not a time"), None);
     }
 
     #[test]

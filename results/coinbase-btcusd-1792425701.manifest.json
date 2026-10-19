@@ -1,0 +1,23 @@
+{
+  "apply_latency_ns": {
+    "max": 10697954,
+    "p50": 518453,
+    "p90": 1501912,
+    "p99": 4012203
+  },
+  "bytes": 970697,
+  "continuity_rule": "Coinbase Advanced Trade level2: every message's sequence_num must equal the previous message's plus one (the chain includes non-book messages on the connection); a skipped number is a gap, triggers unsubscribe/resubscribe, and messages are skipped (counted as dropped_stale) until the fresh snapshot",
+  "dropped_stale": 0,
+  "ended_unix_ns": 1792425822070853077,
+  "events": 2312,
+  "file": "coinbase-btcusd-1792425701.jsonl.zst",
+  "gaps": 0,
+  "lines": 2326,
+  "resyncs": 0,
+  "sha256": "aa9f404f48b8e866d40ade81f0896225847efe91a8dc27f8eed9f805d6c20ee3",
+  "snapshots": 1,
+  "started_unix_ns": 1792425701671592547,
+  "symbol": "BTC-USD",
+  "tool": "bookrecord 0.1.0",
+  "venue": "coinbase"
+}

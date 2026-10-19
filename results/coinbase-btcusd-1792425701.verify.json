@@ -1,0 +1,21 @@
+{
+  "apply_latency_ns": {
+    "p50": 518453,
+    "p90": 1501912,
+    "p99": 4012203
+  },
+  "capture": "/home/ammo/bench/.scratch/bookrecord/coinbase-btcusd-1792425701.jsonl.zst",
+  "chain_breaks_in_applied_events": 0,
+  "consistent": true,
+  "end_record": {
+    "dropped_stale": 0,
+    "events": 2312,
+    "gaps": 0,
+    "resyncs": 0
+  },
+  "end_record_matches": true,
+  "events": 2312,
+  "gaps_logged": 0,
+  "gaps_well_formed": 0,
+  "snapshots": 1
+}
