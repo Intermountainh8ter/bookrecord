@@ -95,3 +95,11 @@ Hypothesis: in a seeded synthetic stream (200 trials, seed 7, 250 data messages,
 Metric: /summary/data_drops_missed_by_heartbeat_only_count. Expected: equals 200, expected_range [200, 200].
 
 Falsifier: any injected data-message drop that the heartbeat-counter-only detector alarms on (missed count below 200), or any alarm on a clean control.
+
+## 2026-10-27T09:39:55Z truncatecheck proposal:5b91cd6ceed7288564e44cf4d56b252a4067a176f23bb3a8246393f257737db1
+
+Hypothesis: over 200 seeded trials of 1500 messages with a drifting mid price and a depth-25 subscription (no delete sent for levels leaving the window), a non-truncating recorder raises at least one top-10 checksum mismatch in at least 1 trial, while a recorder that truncates its local book to 25 levels per side after each update raises zero mismatches in all 200 trials. Differs from retentioncheck, which audits only the final book; this scores the top-10 checksum after every message.
+
+Metric: /summary/checksum_mismatch_count_no_truncate (trials with at least one mismatch). Expected: between 1 and 200, expected_range [1, 200]; truncating arm count 0.
+
+Falsifier: the non-truncating arm raises zero mismatches across all 200 trials, or the truncating arm raises any mismatch.

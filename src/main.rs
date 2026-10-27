@@ -151,6 +151,15 @@ enum Cmd {
         out: PathBuf,
     },
     /// Seeded synthetic experiment: one dropped data message per trial; counts drops missed by a heartbeat-counter-only check versus a per-message sequence_num check, with clean controls.
+    /// Seeded synthetic experiment: per-message top-10 checksum mismatches for a recorder that never truncates versus one that truncates to the subscribed depth, when scope exits send no delete.
+    Truncatecheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     Countercheck {
         #[arg(long, default_value_t = 7)]
         seed: u64,
@@ -1437,6 +1446,114 @@ fn retentioncheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- truncatecheck: per-message top-10 checksum, non-truncating vs truncating recorder ----
+
+const TRK_SCOPE: usize = 25;
+const TRK_EVENTS: u64 = 1500;
+
+fn trk_top(side: &Side, bid: bool) -> Side {
+    if bid { side.iter().rev().take(TRK_SCOPE).map(|(p, q)| (*p, *q)).collect() }
+    else { side.iter().take(TRK_SCOPE).map(|(p, q)| (*p, *q)).collect() }
+}
+
+fn trk_msgs(prev: &Side, new: &Side, full: &Side) -> Vec<(String, String)> {
+    let mut m = Vec::new();
+    for (p, q) in new { if prev.get(p) != Some(q) { m.push((p.to_string(), format!("{q}.00000000"))); } }
+    // a level that left the window while still in the full book is a scope exit: no message
+    for p in prev.keys() { if !new.contains_key(p) && !full.contains_key(p) { m.push((p.to_string(), "0".into())); } }
+    m
+}
+
+/// Returns per arm [no-truncate, truncate]: (mismatching messages, first mismatching message index if any).
+fn truncate_trial(rng: &mut SplitMix) -> [(u64, Option<u64>); 2] {
+    let mut mid = STALE_MID as i64;
+    let (mut fb, mut fa): (Side, Side) = (Side::new(), Side::new());
+    for off in 0..400i64 {
+        fb.insert(mid - 1 - off, 1 + rng.below(9) as u32);
+        fa.insert(mid + 1 + off, 1 + rng.below(9) as u32);
+    }
+    let (mut tb, mut ta) = (trk_top(&fb, true), trk_top(&fa, false));
+    let to_s = |s: &Side| -> Vec<(String, String)> { s.iter().map(|(p, q)| (p.to_string(), format!("{q}.00000000"))).collect() };
+    let mut books: Vec<Book> = (0..2).map(|_| Book::default()).collect();
+    for b in books.iter_mut() { b.load(&to_s(&tb), &to_s(&ta)).unwrap(); }
+    let mut res = [(0u64, None); 2];
+    for n in 0..TRK_EVENTS {
+        if rng.below(2) == 0 {
+            mid += 1;
+            fa.remove(&mid);
+            fb.insert(mid - 1, 1 + rng.below(9) as u32);
+        } else {
+            fb.remove(&mid);
+            mid -= 1;
+            fa.insert(mid + 1, 1 + rng.below(9) as u32);
+        }
+        let bid = rng.below(2) == 0;
+        let off = rng.below(60) as i64;
+        let (side, price) = if bid { (&mut fb, mid - 1 - off) } else { (&mut fa, mid + 1 + off) };
+        if side.contains_key(&price) && side.len() > 100 && rng.below(2) == 0 { side.remove(&price); }
+        else { side.insert(price, 1 + rng.below(9) as u32); }
+        let (nb, na) = (trk_top(&fb, true), trk_top(&fa, false));
+        let (mb, ma) = (trk_msgs(&tb, &nb, &fb), trk_msgs(&ta, &na, &fa));
+        let mut truth = Book::default();
+        truth.load(&to_s(&nb), &to_s(&na)).unwrap();
+        let want = kraken_checksum(&truth, 1, 8);
+        for (i, b) in books.iter_mut().enumerate() {
+            b.apply(&mb, &ma).unwrap();
+            if i == 1 { prune(b, TRK_SCOPE); }
+            if kraken_checksum(b, 1, 8) != want {
+                res[i].0 += 1;
+                if res[i].1.is_none() { res[i].1 = Some(n + 1); }
+            }
+        }
+        tb = nb;
+        ta = na;
+    }
+    res
+}
+
+fn truncatecheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut trials_hit, mut msgs_bad) = ([0u64; 2], [0u64; 2]);
+    let mut first: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
+    for _ in 0..trials {
+        let r = truncate_trial(&mut rng);
+        for i in 0..2 {
+            msgs_bad[i] += r[i].0;
+            if let Some(f) = r[i].1 { trials_hit[i] += 1; first[i].push(f); }
+        }
+    }
+    let mean_first = |v: &Vec<u64>| -> serde_json::Value {
+        if v.is_empty() { serde_json::Value::Null } else { serde_json::json!(v.iter().sum::<u64>() as f64 / v.len() as f64) }
+    };
+    let res = serde_json::json!({
+        "experiment": "truncatecheck",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": TRK_EVENTS, "subscribed_depth": TRK_SCOPE, "checksum_depth": 10,
+                    "note": "mid does a symmetric random walk; the feed sends upserts for levels entering the depth-25 window and deletes only for removed levels, never for levels leaving the window; the checksum is compared against the true top-10 after every message" },
+        "summary": {
+            "checksum_mismatch_count_no_truncate": trials_hit[0],
+            "checksum_mismatch_count_truncate": trials_hit[1],
+            "mismatching_message_count_no_truncate": msgs_bad[0],
+            "mismatching_message_count_truncate": msgs_bad[1],
+            "mean_messages_to_first_mismatch_no_truncate": mean_first(&first[0]),
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- truncatecheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- seqcheck: silent wrong books under message drops with an optional sequence field ----
 
 const SEQ_EVENTS: usize = 250;
@@ -1980,6 +2097,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Heartbeatdelay { seed, trials, out } => heartbeatdelay(seed, trials, &out),
         Cmd::Gappolicy { seed, trials, out } => gappolicy(seed, trials, &out),
         Cmd::Countercheck { seed, trials, out } => countercheck(seed, trials, &out),
+        Cmd::Truncatecheck { seed, trials, out } => truncatecheck(seed, trials, &out),
     }
 }
 
@@ -2174,6 +2292,18 @@ mod tests {
         classcheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/clean_control/false_positive_count_total").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn truncatecheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(truncate_trial(&mut a), truncate_trial(&mut b));
+        assert_eq!(truncate_trial(&mut SplitMix(3))[1].0, 0);
+        let out = std::env::temp_dir().join(format!("bookrecord-trk-{}.json", std::process::id()));
+        truncatecheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/checksum_mismatch_count_no_truncate").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

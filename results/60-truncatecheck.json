@@ -1,0 +1,33 @@
+{
+  "experiment": "truncatecheck",
+  "params": {
+    "checksum_depth": 10,
+    "messages_per_trial": 1500,
+    "note": "mid does a symmetric random walk; the feed sends upserts for levels entering the depth-25 window and deletes only for removed levels, never for levels leaving the window; the checksum is compared against the true top-10 after every message",
+    "seed": 7,
+    "subscribed_depth": 25,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- truncatecheck --seed 7 --trials 200 --out results/60-truncatecheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T09:40:20Z",
+    "wall_s": 13.0
+  },
+  "summary": {
+    "checksum_mismatch_count_no_truncate": 190,
+    "checksum_mismatch_count_truncate": 0,
+    "mean_messages_to_first_mismatch_no_truncate": 487.9894736842105,
+    "mismatching_message_count_no_truncate": 23368,
+    "mismatching_message_count_truncate": 0
+  }
+}
