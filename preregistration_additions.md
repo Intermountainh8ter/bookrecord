@@ -39,3 +39,11 @@ Hypothesis: on a seeded synthetic stream with a drifting mid price where out-of-
 Metric: /retention/matching_level_count_by_corridor/corridor_50. Expected: at least 1 matching level on average per trial, and the 50-level corridor ratio exceeds the naive ratio; expected_range [1, 1000].
 
 Falsifier: the 50-level corridor ratio is not greater than the naive ratio, or the naive book holds no more local levels than the true book.
+
+## 2026-10-27T08:22:26Z order-invariance proposal:95f57c771763739ad405ac40ae1ee0cd176674fef54ec73192ba5ae2becae14a
+
+Hypothesis: on a seeded synthetic absolute-quantity stream (seed 7, 200 trials of 1000 events, reorder window 8), a recorder that drops messages with a lower-than-expected sequence number ends with a book hash equal to the reference in at most 100 of 200 trials, while a recorder that applies by level key with a per-level sequence guard matches in 200 of 200 trials.
+
+Metric: /summary/drop_lower_window8_match_count. Expected: at most 100, expected_range [0, 100]; keyed-guard arm reaches 200.
+
+Falsifier: the drop-lower recorder matches in more than 100 of 200 trials at window 8, or the keyed-guard recorder matches in fewer than 200.

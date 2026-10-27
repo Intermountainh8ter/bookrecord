@@ -1,0 +1,39 @@
+{
+  "experiment": "ordercheck",
+  "params": {
+    "duplicate_pct": 10,
+    "events_per_trial": 1000,
+    "levels": 40,
+    "note": "absolute-quantity updates; delivery shuffled within consecutive blocks of the window size, a share duplicated; final book hash compared with the in-order reference",
+    "seed": 7,
+    "trials": 200,
+    "windows": [
+      1,
+      4,
+      8
+    ]
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- ordercheck --seed 7 --trials 200 --out results/44-order-invariance.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:23:07Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "drop_lower_window1_match_count": 200,
+    "drop_lower_window4_match_count": 0,
+    "drop_lower_window8_match_count": 0,
+    "keyed_guard_window1_match_count": 200,
+    "keyed_guard_window4_match_count": 200,
+    "keyed_guard_window8_match_count": 200
+  }
+}

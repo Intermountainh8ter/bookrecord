@@ -96,6 +96,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: a drop-lower-sequence recorder versus a keyed per-level-guard recorder under local reorder and duplicate delivery.
+    Ordercheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1374,6 +1383,109 @@ fn retentioncheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- ordercheck: sequence-drop recorder vs keyed per-level guard under reorder and duplicates ----
+
+const ORD_EVENTS: u64 = 1000;
+const ORD_LEVELS: u64 = 40;
+const ORD_WINDOWS: [usize; 3] = [1, 4, 8];
+const ORD_DUP_PCT: u64 = 10;
+
+/// (seq, level, absolute quantity; 0 deletes)
+type OrdMsg = (u64, u64, u32);
+
+fn ord_hash(book: &BTreeMap<u64, u32>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for (p, q) in book {
+        for b in p.to_le_bytes().iter().chain(q.to_le_bytes().iter()) {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
+fn ord_set(book: &mut BTreeMap<u64, u32>, level: u64, q: u32) {
+    if q == 0 { book.remove(&level); } else { book.insert(level, q); }
+}
+
+/// Returns (reference hash, drop-lower hash, keyed-guard hash) for one trial at reorder window `w`.
+fn order_trial(rng: &mut SplitMix, w: usize) -> (u64, u64, u64) {
+    let msgs: Vec<OrdMsg> = (1..=ORD_EVENTS)
+        .map(|s| (s, rng.below(ORD_LEVELS), if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 }))
+        .collect();
+    let mut reference = BTreeMap::new();
+    for (_, l, q) in &msgs { ord_set(&mut reference, *l, *q); }
+    // local reorder: shuffle within consecutive blocks of w, then duplicate some messages
+    let mut delivered: Vec<OrdMsg> = Vec::new();
+    for chunk in msgs.chunks(w.max(1)) {
+        let mut c = chunk.to_vec();
+        for i in (1..c.len()).rev() { c.swap(i, rng.below(i as u64 + 1) as usize); }
+        for m in c {
+            delivered.push(m);
+            if rng.below(100) < ORD_DUP_PCT { delivered.push(m); }
+        }
+    }
+    let (mut dl, mut kg) = (BTreeMap::new(), BTreeMap::new());
+    let mut expected = 1u64;
+    let mut level_seq: BTreeMap<u64, u64> = BTreeMap::new();
+    for (s, l, q) in delivered {
+        if s >= expected {
+            ord_set(&mut dl, l, q);
+            expected = s + 1;
+        }
+        if level_seq.get(&l).map_or(true, |ls| s > *ls) {
+            level_seq.insert(l, s);
+            ord_set(&mut kg, l, q);
+        }
+    }
+    (ord_hash(&reference), ord_hash(&dl), ord_hash(&kg))
+}
+
+fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut drop_m = serde_json::Map::new();
+    let mut keyed_m = serde_json::Map::new();
+    for w in ORD_WINDOWS {
+        let (mut d, mut k) = (0u64, 0u64);
+        for _ in 0..trials {
+            let (r, a, b) = order_trial(&mut rng, w);
+            if a == r { d += 1; }
+            if b == r { k += 1; }
+        }
+        drop_m.insert(format!("window{w}"), serde_json::json!(d));
+        keyed_m.insert(format!("window{w}"), serde_json::json!(k));
+    }
+    let res = serde_json::json!({
+        "experiment": "ordercheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": ORD_EVENTS, "levels": ORD_LEVELS,
+                    "windows": ORD_WINDOWS, "duplicate_pct": ORD_DUP_PCT,
+                    "note": "absolute-quantity updates; delivery shuffled within consecutive blocks of the window size, a share duplicated; final book hash compared with the in-order reference" },
+        "summary": {
+            "drop_lower_window1_match_count": drop_m["window1"],
+            "drop_lower_window4_match_count": drop_m["window4"],
+            "drop_lower_window8_match_count": drop_m["window8"],
+            "keyed_guard_window1_match_count": keyed_m["window1"],
+            "keyed_guard_window4_match_count": keyed_m["window4"],
+            "keyed_guard_window8_match_count": keyed_m["window8"],
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- ordercheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1391,6 +1503,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Latencycheck { seed, trials, out } => latencycheck(seed, trials, &out),
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
+        Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
     }
 }
 
@@ -1518,6 +1631,19 @@ mod tests {
         retentioncheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/retention/matching_level_count_by_corridor/corridor_50").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn ordercheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(order_trial(&mut a, 8), order_trial(&mut b, 8));
+        let (r, _, k) = order_trial(&mut SplitMix(3), 8);
+        assert_eq!(r, k);
+        let out = std::env::temp_dir().join(format!("bookrecord-ord-{}.json", std::process::id()));
+        ordercheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

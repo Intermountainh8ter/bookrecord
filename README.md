@@ -72,6 +72,12 @@ Reproduce: `cargo run --locked -q --release -- classcheck --seed 7 --trials 500 
 
 Reproduce: `cargo run --locked -q --release -- retentioncheck --seed 7 --trials 200 --out results/42-retention-corridor.json`
 
+## Reorder and duplicate delivery (synthetic, seed 7)
+
+`bookrecord ordercheck` replays a seeded synthetic absolute-quantity stream (200 trials, 1000 events, 40 levels) with delivery shuffled within consecutive blocks of the window size and 10 percent of messages delivered twice. It compares a recorder that drops any message whose sequence number is below the next expected one with a recorder that applies by level key under a per-level sequence guard, by final book hash against the in-order reference. Result in `results/44-order-invariance.json`: the drop-lower recorder matched the reference in 200 of 200 trials at window 1, 0 of 200 at window 4 and 0 of 200 at window 8; the keyed-guard recorder matched in 200 of 200 trials at all three windows. The pre-registered expectation (at most 100 matches for drop-lower at window 8, 200 for keyed-guard) held. At window 1 the only perturbation is duplicates, which the drop-lower rule discards. The result is close to a property of the harness: any dropped last-writer update changes the final hash. The stream is synthetic; this says nothing about how often real feeds reorder messages.
+
+Reproduce: `cargo run --locked -q --release -- ordercheck --seed 7 --trials 200 --out results/44-order-invariance.json`
+
 ## License
 
 MIT.
