@@ -87,3 +87,11 @@ Hypothesis: over 400 seeded trials (2000-message stream, 40 levels, one drop per
 Metric: /summary/strict_gap_policy_silent_wrong_count. Expected: at most 5 of 400, expected_range [0, 5].
 
 Falsifier: strict_gap_policy_silent_wrong_count above 5, or ignore-policy silent-wrong below 300, or strict false-stale below 20.
+
+## 2026-10-27T09:23:38Z countercheck proposal:a60031ac0c1aa362ccdaabf795f8d0ba6413a5b3a7746d06e31a3549883d6fe8
+
+Hypothesis: in a seeded synthetic stream (200 trials, seed 7, 250 data messages, a heartbeat after every 40 data messages, heartbeats lossless, one data message dropped per trial at a position uniform over all but the last data message), a detector that only checks that heartbeat_counter advances by one per heartbeat misses all 200 data drops, while a per-message sequence_num check with every message numbered misses 0; both raise 0 alarms on 200 clean controls. Unlike seqcheck (sent-count heartbeat) the counter carries no message count.
+
+Metric: /summary/data_drops_missed_by_heartbeat_only_count. Expected: equals 200, expected_range [200, 200].
+
+Falsifier: any injected data-message drop that the heartbeat-counter-only detector alarms on (missed count below 200), or any alarm on a clean control.

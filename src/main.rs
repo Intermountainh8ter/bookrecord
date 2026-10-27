@@ -150,6 +150,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: one dropped data message per trial; counts drops missed by a heartbeat-counter-only check versus a per-message sequence_num check, with clean controls.
+    Countercheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1970,7 +1979,89 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
         Cmd::Heartbeatdelay { seed, trials, out } => heartbeatdelay(seed, trials, &out),
         Cmd::Gappolicy { seed, trials, out } => gappolicy(seed, trials, &out),
+        Cmd::Countercheck { seed, trials, out } => countercheck(seed, trials, &out),
     }
+}
+
+// ---- countercheck: heartbeat-counter-only check vs per-message sequence_num under a dropped data message ----
+
+const CNT_MSGS: u64 = 250;
+const CNT_HB_EVERY: u64 = 40;
+
+#[derive(Clone, Copy)]
+enum CntEv {
+    Data(u64),
+    Heartbeat(u64),
+}
+
+/// Returns (counter-only alarmed, sequence_num alarmed) for one stream; `drop` is the index of a data message to drop.
+fn counter_trial(drop: Option<u64>) -> (bool, bool) {
+    let mut events = Vec::new();
+    let mut hb = 0u64;
+    for s in 1..=CNT_MSGS {
+        if drop != Some(s) { events.push(CntEv::Data(s)); }
+        if s % CNT_HB_EVERY == 0 {
+            hb += 1;
+            events.push(CntEv::Heartbeat(hb));
+        }
+    }
+    let (mut last_seq, mut last_hb) = (0u64, 0u64);
+    let (mut seq_alarm, mut hb_alarm) = (false, false);
+    for e in events {
+        match e {
+            CntEv::Data(s) => {
+                if s != last_seq + 1 { seq_alarm = true; }
+                last_seq = s;
+            }
+            CntEv::Heartbeat(c) => {
+                if c != last_hb + 1 { hb_alarm = true; }
+                last_hb = c;
+            }
+        }
+    }
+    (hb_alarm, seq_alarm)
+}
+
+fn countercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut hb_missed, mut seq_missed) = (0u64, 0u64);
+    let (mut hb_clean_alarms, mut seq_clean_alarms) = (0u64, 0u64);
+    for _ in 0..trials {
+        // dropped position uniform over all but the last data message, so a successor exists to expose a sequence jump
+        let d = 1 + rng.below(CNT_MSGS - 1);
+        let (h, q) = counter_trial(Some(d));
+        if !h { hb_missed += 1; }
+        if !q { seq_missed += 1; }
+        let (h, q) = counter_trial(None);
+        if h { hb_clean_alarms += 1; }
+        if q { seq_clean_alarms += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "countercheck",
+        "params": { "seed": seed, "trials": trials, "data_messages": CNT_MSGS, "heartbeat_every": CNT_HB_EVERY,
+                    "note": "heartbeats lossless; one data message dropped per injected trial; one clean control per trial; counter-only check sees only heartbeat_counter, sequence check sees every message number" },
+        "summary": {
+            "data_drops_missed_by_heartbeat_only_count": hb_missed,
+            "data_drops_missed_by_sequence_num_count": seq_missed,
+            "clean_control_alarms_heartbeat_only_count": hb_clean_alarms,
+            "clean_control_alarms_sequence_num_count": seq_clean_alarms,
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- countercheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2205,5 +2296,16 @@ mod tests {
         l.load(&bids, &asks).unwrap();
         t.apply(&[("99999".into(), "0".into())], &[]).unwrap();
         assert_ne!(kraken_checksum(&t, 2, 8), kraken_checksum(&l, 2, 8));
+    }
+
+    #[test]
+    fn countercheck_detectors_and_pointer_resolve() {
+        assert_eq!(counter_trial(None), (false, false));
+        assert_eq!(counter_trial(Some(10)), (false, true));
+        let out = std::env::temp_dir().join(format!("bookrecord-cnt-{}.json", std::process::id()));
+        countercheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.pointer("/summary/data_drops_missed_by_heartbeat_only_count").unwrap(), 3);
+        assert!(v.pointer("/provenance/started_at").is_some());
     }
 }

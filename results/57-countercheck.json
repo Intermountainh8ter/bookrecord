@@ -1,0 +1,31 @@
+{
+  "experiment": "countercheck",
+  "params": {
+    "data_messages": 250,
+    "heartbeat_every": 40,
+    "note": "heartbeats lossless; one data message dropped per injected trial; one clean control per trial; counter-only check sees only heartbeat_counter, sequence check sees every message number",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- countercheck --seed 7 --trials 200 --out results/57-countercheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T09:23:54Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "clean_control_alarms_heartbeat_only_count": 0,
+    "clean_control_alarms_sequence_num_count": 0,
+    "data_drops_missed_by_heartbeat_only_count": 200,
+    "data_drops_missed_by_sequence_num_count": 0
+  }
+}
