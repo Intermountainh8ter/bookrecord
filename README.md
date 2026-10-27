@@ -81,3 +81,9 @@ Reproduce: `cargo run --locked -q --release -- ordercheck --seed 7 --trials 200 
 ## License
 
 MIT.
+
+## Snapshot reordered against updates (synthetic, seed 7)
+
+`bookrecord snapshotcheck` replays a seeded synthetic absolute-quantity stream (200 trials, 1000 events, 40 levels) with a full snapshot after every 25th update. Snapshots and updates are shuffled together within consecutive blocks of the window size and 10 percent of messages are delivered twice. It compares a recorder that replaces its book on every snapshot with a recorder that tags each level with its sequence number and ignores snapshot levels older than the level's last write, by final book hash against the in-order reference. Result in `results/45-snapshot-reorder.json`: the replace-on-snapshot recorder matched the reference in 200 of 200 trials at window 1, 195 of 200 at window 4 and 177 of 200 at window 8; the guarded-merge recorder matched in 200 of 200 trials at all three windows. The pre-registered expectation (at most 100 matches for replace-on-snapshot at window 8) was not met, so the hypothesis is refuted: later updates rewrite most levels a stale snapshot damaged, so only damage near the end of the stream survives to the final hash. The final hash understates transient divergence mid-stream, which this run does not measure. The stream is synthetic; this says nothing about how often real feeds reorder snapshots.
+
+Reproduce: `cargo run --locked -q --release -- snapshotcheck --seed 7 --trials 200 --out results/45-snapshot-reorder.json`

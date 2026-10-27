@@ -47,3 +47,11 @@ Hypothesis: on a seeded synthetic absolute-quantity stream (seed 7, 200 trials o
 Metric: /summary/drop_lower_window8_match_count. Expected: at most 100, expected_range [0, 100]; keyed-guard arm reaches 200.
 
 Falsifier: the drop-lower recorder matches in more than 100 of 200 trials at window 8, or the keyed-guard recorder matches in fewer than 200.
+
+## 2026-10-27T08:27:43Z snapshot-reorder proposal:2c7299da4a5b9f6c3c0138d1b4fd12128babb40ecc7a96ab36d0dd5203934447
+
+Hypothesis: on a seeded synthetic absolute-quantity stream with periodic full resnapshots (seed 7, 200 trials), delivery shuffled within blocks of window 8 makes a recorder that replaces its book on every snapshot match the in-order reference final book hash in at most 100 of 200 trials, while a recorder that tags each level with its sequence number and ignores snapshot levels older than the level's last write matches in 200 of 200 trials.
+
+Metric: /summary/snapshot_replace_hash_match_count_window8. Expected: at most 100, expected_range [0, 100]; guarded-merge arm reaches 200.
+
+Falsifier: the replace-on-snapshot arm matches in more than 100 of 200 trials at window 8, or the guarded-merge arm matches in fewer than 200 of 200.

@@ -1,0 +1,40 @@
+{
+  "experiment": "snapshotcheck",
+  "params": {
+    "duplicate_pct": 10,
+    "events_per_trial": 1000,
+    "levels": 40,
+    "note": "absolute-quantity updates with a full snapshot after every snapshot_every-th update; snapshots and updates shuffled together within consecutive blocks of the window size, a share duplicated; final book hash compared with the in-order reference",
+    "seed": 7,
+    "snapshot_every": 25,
+    "trials": 200,
+    "windows": [
+      1,
+      4,
+      8
+    ]
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- snapshotcheck --seed 7 --trials 200 --out results/45-snapshot-reorder.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:27:58Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "guarded_merge_hash_match_count_window1": 200,
+    "guarded_merge_hash_match_count_window4": 200,
+    "guarded_merge_hash_match_count_window8": 200,
+    "snapshot_replace_hash_match_count_window1": 200,
+    "snapshot_replace_hash_match_count_window4": 195,
+    "snapshot_replace_hash_match_count_window8": 177
+  }
+}

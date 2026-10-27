@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: a replace-on-snapshot recorder versus a sequence-guarded merge recorder when snapshots are reordered against updates.
+    Snapshotcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1486,6 +1495,105 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- snapshotcheck: replace-on-snapshot recorder vs sequence-guarded merge under snapshot/update reorder ----
+
+const SNAP_EVERY: u64 = 25;
+
+#[derive(Clone)]
+enum SnapMsg {
+    Upd(u64, u64, u32),
+    Snap(u64, BTreeMap<u64, u32>),
+}
+
+/// Returns (reference hash, replace-on-snapshot hash, guarded-merge hash) for one trial at reorder window `w`.
+fn snapshot_trial(rng: &mut SplitMix, w: usize) -> (u64, u64, u64) {
+    let mut reference = BTreeMap::new();
+    let mut msgs: Vec<SnapMsg> = Vec::new();
+    for s in 1..=ORD_EVENTS {
+        let (l, q) = (rng.below(ORD_LEVELS), if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 });
+        ord_set(&mut reference, l, q);
+        msgs.push(SnapMsg::Upd(s, l, q));
+        if s % SNAP_EVERY == 0 { msgs.push(SnapMsg::Snap(s, reference.clone())); }
+    }
+    let mut delivered: Vec<SnapMsg> = Vec::new();
+    for chunk in msgs.chunks(w.max(1)) {
+        let mut c = chunk.to_vec();
+        for i in (1..c.len()).rev() { c.swap(i, rng.below(i as u64 + 1) as usize); }
+        for m in c {
+            delivered.push(m.clone());
+            if rng.below(100) < ORD_DUP_PCT { delivered.push(m); }
+        }
+    }
+    let (mut rp, mut gm) = (BTreeMap::new(), BTreeMap::new());
+    let mut level_seq: BTreeMap<u64, u64> = BTreeMap::new();
+    for m in delivered {
+        match m {
+            SnapMsg::Upd(s, l, q) => {
+                ord_set(&mut rp, l, q);
+                if level_seq.get(&l).map_or(true, |ls| s > *ls) {
+                    level_seq.insert(l, s);
+                    ord_set(&mut gm, l, q);
+                }
+            }
+            SnapMsg::Snap(s, book) => {
+                rp = book.clone();
+                for l in 0..ORD_LEVELS {
+                    if level_seq.get(&l).map_or(true, |ls| s > *ls) {
+                        level_seq.insert(l, s);
+                        ord_set(&mut gm, l, book.get(&l).copied().unwrap_or(0));
+                    }
+                }
+            }
+        }
+    }
+    (ord_hash(&reference), ord_hash(&rp), ord_hash(&gm))
+}
+
+fn snapshotcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut rep_m = serde_json::Map::new();
+    let mut grd_m = serde_json::Map::new();
+    for w in ORD_WINDOWS {
+        let (mut d, mut k) = (0u64, 0u64);
+        for _ in 0..trials {
+            let (r, a, b) = snapshot_trial(&mut rng, w);
+            if a == r { d += 1; }
+            if b == r { k += 1; }
+        }
+        rep_m.insert(format!("window{w}"), serde_json::json!(d));
+        grd_m.insert(format!("window{w}"), serde_json::json!(k));
+    }
+    let res = serde_json::json!({
+        "experiment": "snapshotcheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": ORD_EVENTS, "levels": ORD_LEVELS,
+                    "windows": ORD_WINDOWS, "duplicate_pct": ORD_DUP_PCT, "snapshot_every": SNAP_EVERY,
+                    "note": "absolute-quantity updates with a full snapshot after every snapshot_every-th update; snapshots and updates shuffled together within consecutive blocks of the window size, a share duplicated; final book hash compared with the in-order reference" },
+        "summary": {
+            "snapshot_replace_hash_match_count_window1": rep_m["window1"],
+            "snapshot_replace_hash_match_count_window4": rep_m["window4"],
+            "snapshot_replace_hash_match_count_window8": rep_m["window8"],
+            "guarded_merge_hash_match_count_window1": grd_m["window1"],
+            "guarded_merge_hash_match_count_window4": grd_m["window4"],
+            "guarded_merge_hash_match_count_window8": grd_m["window8"],
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- snapshotcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1504,6 +1612,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
     }
 }
 
@@ -1644,6 +1753,19 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn snapshotcheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(snapshot_trial(&mut a, 8), snapshot_trial(&mut b, 8));
+        let (r, _, g) = snapshot_trial(&mut SplitMix(3), 8);
+        assert_eq!(r, g);
+        let out = std::env::temp_dir().join(format!("bookrecord-snap-{}.json", std::process::id()));
+        snapshotcheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/snapshot_replace_hash_match_count_window8").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
