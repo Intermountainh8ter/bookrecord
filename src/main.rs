@@ -141,6 +141,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: one dropped message per trial replayed through three modelled gap policies (ignore, strict ID-gap, heartbeat-miss reconnect); counts silent-wrong and false-stale trials.
+    Gappolicy {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 400)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1572,6 +1581,85 @@ fn heartbeatdelay(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- gappolicy: silent-wrong and false-stale trials per modelled gap policy ----
+
+const GP_MESSAGES: u64 = 2000;
+const GP_LEVELS: u64 = 40;
+const GP_HEARTBEAT_EVERY: u64 = 50;
+const GP_HEARTBEAT_LOSS_PCT: u64 = 10;
+
+/// One trial with one dropped message. Returns (final book wrong, [ignore, strict, heartbeat] alarmed).
+/// Strict: a received message whose id is above last applied + 1 marks the book stale. Heartbeat: a received
+/// heartbeat every GP_HEARTBEAT_EVERY messages carries the sent count; a mismatch triggers reconnect.
+fn gp_trial(rng: &mut SplitMix) -> (bool, [bool; 3]) {
+    let msgs: Vec<(u64, u32)> = (0..GP_MESSAGES)
+        .map(|_| (rng.below(GP_LEVELS), if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 }))
+        .collect();
+    let drop_idx = rng.below(GP_MESSAGES);
+    let (mut truth, mut local) = (BTreeMap::new(), BTreeMap::new());
+    let mut alarms = [false; 3];
+    let mut last_id = 0u64;
+    let (mut sent, mut received) = (0u64, 0u64);
+    for (i, (l, q)) in msgs.iter().enumerate() {
+        let id = i as u64 + 1;
+        ord_set(&mut truth, *l, *q);
+        sent += 1;
+        if i as u64 != drop_idx {
+            if id > last_id + 1 { alarms[1] = true; }
+            last_id = id;
+            ord_set(&mut local, *l, *q);
+            received += 1;
+        }
+        if id % GP_HEARTBEAT_EVERY == 0 {
+            let lost = rng.below(100) < GP_HEARTBEAT_LOSS_PCT;
+            if !lost && sent != received { alarms[2] = true; }
+        }
+    }
+    (ord_hash(&truth) != ord_hash(&local), alarms)
+}
+
+fn gappolicy(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let names = ["ignore", "strict_gap", "heartbeat_reconnect"];
+    let (mut wrong, mut silent, mut stale_final_ok) = (0u64, [0u64; 3], [0u64; 3]);
+    for _ in 0..trials {
+        let (w, a) = gp_trial(&mut rng);
+        if w { wrong += 1; }
+        for k in 0..3 {
+            if w && !a[k] { silent[k] += 1; }
+            if !w && a[k] { stale_final_ok[k] += 1; }
+        }
+    }
+    let mut summary = serde_json::Map::new();
+    summary.insert("wrong_final_book_count".into(), wrong.into());
+    for k in 0..3 {
+        summary.insert(format!("{}_policy_silent_wrong_count", names[k]), silent[k].into());
+        summary.insert(format!("{}_policy_false_stale_count", names[k]), stale_final_ok[k].into());
+    }
+    let res = serde_json::json!({
+        "experiment": "gappolicy",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": GP_MESSAGES, "levels": GP_LEVELS,
+                    "heartbeat_every": GP_HEARTBEAT_EVERY, "heartbeat_loss_pct": GP_HEARTBEAT_LOSS_PCT,
+                    "note": "one message dropped per trial, position uniform; silent-wrong = final book differs from reference and the policy never alarmed; false-stale = policy alarmed but the final book equals the reference" },
+        "summary": summary,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- gappolicy --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- ordercheck: sequence-drop recorder vs keyed per-level guard under reorder and duplicates ----
 
 const ORD_EVENTS: u64 = 1000;
@@ -1881,6 +1969,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
         Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
         Cmd::Heartbeatdelay { seed, trials, out } => heartbeatdelay(seed, trials, &out),
+        Cmd::Gappolicy { seed, trials, out } => gappolicy(seed, trials, &out),
     }
 }
 
@@ -2036,6 +2125,17 @@ mod tests {
         heartbeatdelay(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/undetected_over_one_interval_count_h50").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn gappolicy_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(gp_trial(&mut a), gp_trial(&mut b));
+        let out = std::env::temp_dir().join(format!("bookrecord-gp-{}.json", std::process::id()));
+        gappolicy(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/strict_gap_policy_silent_wrong_count").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

@@ -79,3 +79,11 @@ Hypothesis: with heartbeat loss probability 0.1 and 500 trials per interval H (1
 Metric: /summary/undetected_over_one_interval_count_h50. Expected: roughly 50 of 500, expected_range [30, 75].
 
 Falsifier: a count at H=50 below 30 or above 75 of 500 trials, or any trial detected after more than one interval with no heartbeat lost.
+
+## 2026-10-27T08:46:32Z gap-policy proposal:a5c934bf1a9765d9dd3c99c631c3c0d43fd32e1c2777bad38cab55833faf69ed
+
+Hypothesis: over 400 seeded trials (2000-message stream, 40 levels, one drop per trial, drop position uniform), the strict ID-gap policy leaves at most 5 trials silent-wrong (final book wrong while the policy never alarmed), the ignore policy leaves at least 300 silent-wrong, and the strict policy raises at least 20 false-stale trials (alarmed though the final book equals the reference because later updates overwrote the dropped level). Differs from seqcheck (no policy, final-book wrongness only) and heartbeatdelay (detection delay). Heartbeat every 50 messages, lost with probability 0.1, is the third modelled policy.
+
+Metric: /summary/strict_gap_policy_silent_wrong_count. Expected: at most 5 of 400, expected_range [0, 5].
+
+Falsifier: strict_gap_policy_silent_wrong_count above 5, or ignore-policy silent-wrong below 300, or strict false-stale below 20.

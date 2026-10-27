@@ -1,0 +1,36 @@
+{
+  "experiment": "gappolicy",
+  "params": {
+    "heartbeat_every": 50,
+    "heartbeat_loss_pct": 10,
+    "levels": 40,
+    "messages_per_trial": 2000,
+    "note": "one message dropped per trial, position uniform; silent-wrong = final book differs from reference and the policy never alarmed; false-stale = policy alarmed but the final book equals the reference",
+    "seed": 7,
+    "trials": 400
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- gappolicy --seed 7 --trials 400 --out results/49-gap-policy.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:46:47Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "heartbeat_reconnect_policy_false_stale_count": 391,
+    "heartbeat_reconnect_policy_silent_wrong_count": 1,
+    "ignore_policy_false_stale_count": 0,
+    "ignore_policy_silent_wrong_count": 9,
+    "strict_gap_policy_false_stale_count": 391,
+    "strict_gap_policy_silent_wrong_count": 0,
+    "wrong_final_book_count": 9
+  }
+}
