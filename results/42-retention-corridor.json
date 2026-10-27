@@ -1,0 +1,57 @@
+{
+  "experiment": "retentioncheck",
+  "params": {
+    "corridors": [
+      25,
+      50,
+      100
+    ],
+    "events_per_trial": 1500,
+    "note": "drifting mid; the venue sends upserts for levels entering the top-100 window and deletes only for genuinely removed levels, never for levels that leave the window; the final audit compares each local book with the true top-100 window",
+    "scope_levels_per_side": 100,
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- retentioncheck --seed 7 --trials 200 --out results/42-retention-corridor.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:12:43Z",
+    "wall_s": 4.0
+  },
+  "retention": {
+    "local_level_count": {
+      "corridor_100": 40000,
+      "corridor_25": 10000,
+      "corridor_50": 20000,
+      "naive": 61269
+    },
+    "matching_level_count_by_corridor": {
+      "corridor_100": 200.0,
+      "corridor_25": 50.0,
+      "corridor_50": 100.0,
+      "naive": 200.0
+    },
+    "matching_level_count_total": {
+      "corridor_100": 40000,
+      "corridor_25": 10000,
+      "corridor_50": 20000,
+      "naive": 40000
+    },
+    "matching_to_local_ratio": {
+      "corridor_100": 1.0,
+      "corridor_25": 1.0,
+      "corridor_50": 1.0,
+      "naive": 0.6528587050547585
+    },
+    "true_level_count_total": 40000
+  }
+}

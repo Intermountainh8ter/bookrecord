@@ -87,6 +87,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: a naive book versus books pruned to corridor depths 25, 50 and 100 when out-of-scope levels get no delete message.
+    Retentioncheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1240,6 +1249,131 @@ fn classcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- retentioncheck: naive book vs corridor-pruned books when scope exits send no delete ----
+
+const RET_SCOPE: usize = 100;
+const RET_EVENTS: u64 = 1500;
+const RET_CORRIDORS: [usize; 3] = [25, 50, 100];
+
+type Side = BTreeMap<i64, u32>;
+
+fn ret_top(side: &Side, bid: bool) -> Side {
+    if bid { side.iter().rev().take(RET_SCOPE).map(|(p, q)| (*p, *q)).collect() }
+    else { side.iter().take(RET_SCOPE).map(|(p, q)| (*p, *q)).collect() }
+}
+
+fn ret_msgs(prev: &Side, new: &Side, full: &Side) -> Vec<(String, String)> {
+    let mut m = Vec::new();
+    for (p, q) in new { if prev.get(p) != Some(q) { m.push((p.to_string(), format!("{q}.00000000"))); } }
+    // a level that left the visible window while still in the full book is a scope exit: no message
+    for p in prev.keys() { if !new.contains_key(p) && !full.contains_key(p) { m.push((p.to_string(), "0".into())); } }
+    m
+}
+
+fn prune(book: &mut Book, k: usize) {
+    while book.bids.len() > k { let p = *book.bids.keys().next().unwrap(); book.bids.remove(&p); }
+    while book.asks.len() > k { let p = *book.asks.keys().next_back().unwrap(); book.asks.remove(&p); }
+}
+
+/// Returns (local levels, matching levels) for [naive, corridor 25, 50, 100], plus the true level count.
+fn retention_trial(rng: &mut SplitMix) -> (usize, [(usize, usize); 4]) {
+    let mut mid = STALE_MID as i64;
+    let (mut fb, mut fa): (Side, Side) = (Side::new(), Side::new());
+    for off in 0..1200i64 {
+        fb.insert(mid - 1 - off, 1 + rng.below(9) as u32);
+        fa.insert(mid + 1 + off, 1 + rng.below(9) as u32);
+    }
+    let (mut tb, mut ta) = (ret_top(&fb, true), ret_top(&fa, false));
+    let to_s = |s: &Side| -> Vec<(String, String)> { s.iter().map(|(p, q)| (p.to_string(), format!("{q}.00000000"))).collect() };
+    let mut books: Vec<Book> = (0..4).map(|_| Book::default()).collect();
+    for b in books.iter_mut() { b.load(&to_s(&tb), &to_s(&ta)).unwrap(); }
+    for _ in 0..RET_EVENTS {
+        if rng.below(100) < 55 {
+            mid += 1;
+            fa.remove(&mid);
+            fb.insert(mid - 1, 1 + rng.below(9) as u32);
+        } else {
+            fb.remove(&mid);
+            mid -= 1;
+            fa.insert(mid + 1, 1 + rng.below(9) as u32);
+        }
+        let bid = rng.below(2) == 0;
+        let off = rng.below(300) as i64;
+        let (side, price) = if bid { (&mut fb, mid - 1 - off) } else { (&mut fa, mid + 1 + off) };
+        if side.contains_key(&price) && side.len() > 150 && rng.below(2) == 0 { side.remove(&price); }
+        else { side.insert(price, 1 + rng.below(9) as u32); }
+        let (nb, na) = (ret_top(&fb, true), ret_top(&fa, false));
+        let (mb, ma) = (ret_msgs(&tb, &nb, &fb), ret_msgs(&ta, &na, &fa));
+        for (i, b) in books.iter_mut().enumerate() {
+            b.apply(&mb, &ma).unwrap();
+            if i > 0 { prune(b, RET_CORRIDORS[i - 1]); }
+        }
+        tb = nb;
+        ta = na;
+    }
+    let (truth_b, truth_a) = (to_s(&tb), to_s(&ta));
+    let mut truth = Book::default();
+    truth.load(&truth_b, &truth_a).unwrap();
+    let mut out = [(0usize, 0usize); 4];
+    for (i, b) in books.iter().enumerate() {
+        let local = b.bids.len() + b.asks.len();
+        let m = b.bids.iter().filter(|(p, q)| truth.bids.get(p) == Some(q)).count()
+            + b.asks.iter().filter(|(p, q)| truth.asks.get(p) == Some(q)).count();
+        out[i] = (local, m);
+    }
+    (truth.bids.len() + truth.asks.len(), out)
+}
+
+fn retentioncheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut truth_total, mut local, mut matching) = (0u64, [0u64; 4], [0u64; 4]);
+    for _ in 0..trials {
+        let (t, r) = retention_trial(&mut rng);
+        truth_total += t as u64;
+        for i in 0..4 { local[i] += r[i].0 as u64; matching[i] += r[i].1 as u64; }
+    }
+    let names = ["naive", "corridor_25", "corridor_50", "corridor_100"];
+    let n = trials.max(1) as f64;
+    let mut local_m = serde_json::Map::new();
+    let mut match_m = serde_json::Map::new();
+    let mut total_match_m = serde_json::Map::new();
+    let mut ratio_m = serde_json::Map::new();
+    for i in 0..4 {
+        local_m.insert(names[i].into(), serde_json::json!(local[i]));
+        total_match_m.insert(names[i].into(), serde_json::json!(matching[i]));
+        match_m.insert(names[i].into(), serde_json::json!(matching[i] as f64 / n));
+        ratio_m.insert(names[i].into(), serde_json::json!(if local[i] == 0 { 0.0 } else { matching[i] as f64 / local[i] as f64 }));
+    }
+    let res = serde_json::json!({
+        "experiment": "retentioncheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": RET_EVENTS, "scope_levels_per_side": RET_SCOPE,
+                    "corridors": RET_CORRIDORS,
+                    "note": "drifting mid; the venue sends upserts for levels entering the top-100 window and deletes only for genuinely removed levels, never for levels that leave the window; the final audit compares each local book with the true top-100 window" },
+        "retention": {
+            "true_level_count_total": truth_total,
+            "local_level_count": local_m,
+            "matching_level_count_total": total_match_m,
+            "matching_level_count_by_corridor": match_m,
+            "matching_to_local_ratio": ratio_m,
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- retentioncheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["retention"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1256,6 +1390,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Depthcheck { seed, trials, out } => depthcheck(seed, trials, &out),
         Cmd::Latencycheck { seed, trials, out } => latencycheck(seed, trials, &out),
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
+        Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
     }
 }
 
@@ -1369,6 +1504,20 @@ mod tests {
         classcheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/clean_control/false_positive_count_total").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn retentioncheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        let (ta, ra) = retention_trial(&mut a);
+        let (tb, rb) = retention_trial(&mut b);
+        assert_eq!((ta, ra), (tb, rb));
+        assert!(ra[0].0 >= ta);
+        let out = std::env::temp_dir().join(format!("bookrecord-ret-{}.json", std::process::id()));
+        retentioncheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/retention/matching_level_count_by_corridor/corridor_50").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

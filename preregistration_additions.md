@@ -31,3 +31,11 @@ Hypothesis: on 500 defect-free seeded control streams (seed 7, 4000 events each)
 Metric: /clean_control/false_positive_count_total. Expected: equals 0, expected_range [0, 0].
 
 Falsifier: any alarm from any detector on a clean control stream (false_positive_count_total above 0), or a per-class top-10 CRC32 catch count below 75 of 500 for dropped-insert or dropped-quantity.
+
+## 2026-10-27T08:11:48Z retention-corridor proposal:6adc8868193cc93780d673bea47cfcc04720cd0df7de36199202360c240b9827
+
+Hypothesis: on a seeded synthetic stream with a drifting mid price where out-of-scope levels receive no delete (seed 7, 200 trials), a book truncated to 50 levels from the best price has a higher matching-to-local level ratio at the final audit than the naive book, and the naive book holds more local levels than the true book.
+
+Metric: /retention/matching_level_count_by_corridor/corridor_50. Expected: at least 1 matching level on average per trial, and the 50-level corridor ratio exceeds the naive ratio; expected_range [1, 1000].
+
+Falsifier: the 50-level corridor ratio is not greater than the naive ratio, or the naive book holds no more local levels than the true book.

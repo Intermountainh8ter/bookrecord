@@ -66,6 +66,12 @@ Reproduce: `cargo run --locked -q --release -- latencycheck --seed 7 --trials 50
 
 Reproduce: `cargo run --locked -q --release -- classcheck --seed 7 --trials 500 --out results/40-defect-class-controls.json`
 
+## Retention corridor (synthetic, seed 7)
+
+`bookrecord retentioncheck` runs a naive local book and local books pruned to corridor depths 25, 50 and 100 levels per side over a seeded synthetic stream (200 trials, 1500 events each) with a drifting mid price. The feed sends upserts for levels entering the top-100 window and deletes only for removed levels, never for levels that leave the window. Result in `results/42-retention-corridor.json`: at the final audit the true book held 40000 levels across all trials; the naive book held 61269 local levels of which 40000 matched (matching-to-local ratio 0.6528587050547585); the corridor books held 10000, 20000 and 40000 levels at depths 25, 50 and 100, all matching (ratio 1.0). The pre-registered expectation held: the 50-level corridor matched 100.0 levels per trial on average and its ratio exceeded the naive ratio, and the naive book held more local levels than the true book. The corridor at 100 equals the venue window by construction, and a shallower corridor trades coverage for exactness: the 25-level corridor matched 10000 of the 40000 true levels. The stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- retentioncheck --seed 7 --trials 200 --out results/42-retention-corridor.json`
+
 ## License
 
 MIT.
