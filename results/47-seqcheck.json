@@ -1,0 +1,37 @@
+{
+  "experiment": "seqcheck",
+  "params": {
+    "hash_every": 100,
+    "heartbeat_every": 40,
+    "levels": 40,
+    "messages_per_trial": 250,
+    "note": "one message dropped per trial; sequence-only alarms when two consecutively received messages both carry a sequence number and it does not advance by one; heartbeat compares a sent count with the received count; full-hash compares book hashes at checkpoints",
+    "seed": 7,
+    "sequence_absent_pct": 20,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- seqcheck --seed 7 --trials 200 --out results/47-seqcheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:37:36Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "clean_control_alarms_full_hash": 0,
+    "clean_control_alarms_heartbeat": 0,
+    "clean_control_alarms_sequence_only": 0,
+    "silent_wrong_book_count_full_hash": 13,
+    "silent_wrong_book_count_heartbeat": 4,
+    "silent_wrong_book_count_sequence_only": 7,
+    "wrong_final_book_count": 21
+  }
+}

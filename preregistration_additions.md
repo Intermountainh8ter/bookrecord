@@ -63,3 +63,11 @@ Hypothesis: over 300 seeded trials (seed 7) with snapshot delays of 1 to 50 even
 Metric: /summary/gapfree_but_wrong_count_naive_start. Expected: at least 100 of 300, expected_range [100, 300]; correct-procedure count is 0.
 
 Falsifier: gapfree_but_wrong_count_naive_start below 100 of 300, or the buffer-snapshot-discard procedure producing any wrong gap-free book.
+
+## 2026-10-27T08:37:30Z seqcheck proposal:334f13ccc075c14b9ea27e7c8b6dc3588f376c67f5235acd442e64485fbe57fd
+
+Hypothesis: with sequence_num absent on 20 percent of messages and one message dropped per trial (200 trials, seed 7), the sequence-only detector (alarms only when two consecutively received messages both carry a sequence number and it does not advance by one) leaves at least 30 trials with a wrong final book and no alarm, because drops of field-less messages are invisible to it. Stream parameters fixed before running: 250 messages, 40 levels, heartbeat counter every 40 messages, full-book hash every 100 messages.
+
+Metric: /summary/silent_wrong_book_count_sequence_only. Expected: at least 30 of 200, expected_range [30, 200].
+
+Falsifier: fewer than 30 of 200 trials have a wrong final book with no sequence-only alarm, or the sequence-only detector raises an alarm on any clean control stream.

@@ -123,6 +123,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: one dropped message per trial, counting wrong final books that a sequence-only, a heartbeat-count and a periodic full-hash detector each miss.
+    Seqcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1401,6 +1410,90 @@ fn retentioncheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- seqcheck: silent wrong books under message drops with an optional sequence field ----
+
+const SEQ_EVENTS: usize = 250;
+const SEQ_LEVELS: u64 = 40;
+const SEQ_ABSENT_PCT: u64 = 20;
+const SEQ_HEARTBEAT_EVERY: usize = 40;
+const SEQ_HASH_EVERY: usize = 100;
+
+/// One trial. `drop_idx` None = clean control. Returns (wrong final book, [sequence-only, heartbeat, full-hash] alarms).
+fn seq_trial(rng: &mut SplitMix, drop: bool) -> (bool, [bool; 3]) {
+    let msgs: Vec<(u64, u32, bool)> = (0..SEQ_EVENTS)
+        .map(|_| (rng.below(SEQ_LEVELS), if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 }, rng.below(100) >= SEQ_ABSENT_PCT))
+        .collect();
+    let drop_idx = if drop { Some(rng.below(SEQ_EVENTS as u64) as usize) } else { None };
+    let (mut truth, mut local) = (BTreeMap::new(), BTreeMap::new());
+    let mut alarms = [false; 3];
+    let mut prev_carried: Option<u64> = None; // seq of the previous received message if it carried one
+    let (mut received, mut sent) = (0usize, 0usize);
+    for (i, (l, q, has)) in msgs.iter().enumerate() {
+        let seq = (i + 1) as u64;
+        ord_set(&mut truth, *l, *q);
+        sent += 1;
+        if Some(i) != drop_idx {
+            ord_set(&mut local, *l, *q);
+            received += 1;
+            if let (Some(p), true) = (prev_carried, *has) {
+                if seq != p + 1 { alarms[0] = true; }
+            }
+            prev_carried = if *has { Some(seq) } else { None };
+        }
+        let n = i + 1;
+        if n % SEQ_HEARTBEAT_EVERY == 0 && sent != received { alarms[1] = true; }
+        if n % SEQ_HASH_EVERY == 0 && ord_hash(&truth) != ord_hash(&local) { alarms[2] = true; }
+    }
+    (ord_hash(&truth) != ord_hash(&local), alarms)
+}
+
+fn seqcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut wrong, mut silent) = (0u64, [0u64; 3]);
+    for _ in 0..trials {
+        let (w, a) = seq_trial(&mut rng, true);
+        if w {
+            wrong += 1;
+            for k in 0..3 { if !a[k] { silent[k] += 1; } }
+        }
+    }
+    let mut clean = [0u64; 3];
+    for _ in 0..trials {
+        let (_, a) = seq_trial(&mut rng, false);
+        for k in 0..3 { if a[k] { clean[k] += 1; } }
+    }
+    let res = serde_json::json!({
+        "experiment": "seqcheck",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": SEQ_EVENTS, "levels": SEQ_LEVELS,
+                    "sequence_absent_pct": SEQ_ABSENT_PCT, "heartbeat_every": SEQ_HEARTBEAT_EVERY, "hash_every": SEQ_HASH_EVERY,
+                    "note": "one message dropped per trial; sequence-only alarms when two consecutively received messages both carry a sequence number and it does not advance by one; heartbeat compares a sent count with the received count; full-hash compares book hashes at checkpoints" },
+        "summary": {
+            "wrong_final_book_count": wrong,
+            "silent_wrong_book_count_sequence_only": silent[0],
+            "silent_wrong_book_count_heartbeat": silent[1],
+            "silent_wrong_book_count_full_hash": silent[2],
+            "clean_control_alarms_sequence_only": clean[0],
+            "clean_control_alarms_heartbeat": clean[1],
+            "clean_control_alarms_full_hash": clean[2],
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- seqcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- ordercheck: sequence-drop recorder vs keyed per-level guard under reorder and duplicates ----
 
 const ORD_EVENTS: u64 = 1000;
@@ -1708,6 +1801,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
         Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
+        Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
     }
 }
 
@@ -1848,6 +1942,20 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn seqcheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(seq_trial(&mut a, true), seq_trial(&mut b, true));
+        for s in 0..20 {
+            assert_eq!(seq_trial(&mut SplitMix(s), false), (false, [false; 3]));
+        }
+        let out = std::env::temp_dir().join(format!("bookrecord-seq-{}.json", std::process::id()));
+        seqcheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/silent_wrong_book_count_sequence_only").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
