@@ -1,0 +1,40 @@
+{
+  "experiment": "startupcheck",
+  "params": {
+    "events_per_trial": 100,
+    "levels": 40,
+    "note": "absolute-quantity single-id events; snapshot reflects events up to the delay; procedures differ only in which events are applied after it; gap check is the update-ID chain over applied events",
+    "seed": 7,
+    "snapshot_delay_events": [
+      1,
+      50
+    ],
+    "trials": 300
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- startupcheck --seed 7 --trials 300 --out results/46-startup-ordering.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:32:57Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "gap_check_failed_count_buffer_discard": 0,
+    "gap_check_failed_count_naive_start": 0,
+    "gap_check_failed_count_snapshot_first": 0,
+    "gapfree_and_right_count_buffer_discard": 300,
+    "gapfree_and_right_count_naive_start": 300,
+    "gapfree_and_right_count_snapshot_first": 51,
+    "gapfree_but_wrong_count_buffer_discard": 0,
+    "gapfree_but_wrong_count_naive_start": 0,
+    "gapfree_but_wrong_count_snapshot_first": 249
+  }
+}

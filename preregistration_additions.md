@@ -55,3 +55,11 @@ Hypothesis: on a seeded synthetic absolute-quantity stream with periodic full re
 Metric: /summary/snapshot_replace_hash_match_count_window8. Expected: at most 100, expected_range [0, 100]; guarded-merge arm reaches 200.
 
 Falsifier: the replace-on-snapshot arm matches in more than 100 of 200 trials at window 8, or the guarded-merge arm matches in fewer than 200 of 200.
+
+## 2026-10-27T08:32:20Z startup-ordering proposal:2dc39b8ae15b3780dd1899b34c3fb875992749954a47823137e5d6fb741773b7
+
+Hypothesis: over 300 seeded trials (seed 7) with snapshot delays of 1 to 50 events, the naive subscribe-then-snapshot start-up with no discard yields at least 100 final books that pass the update-ID gap check yet differ from the ground-truth book, while the buffer-snapshot-discard procedure yields 0.
+
+Metric: /summary/gapfree_but_wrong_count_naive_start. Expected: at least 100 of 300, expected_range [100, 300]; correct-procedure count is 0.
+
+Falsifier: gapfree_but_wrong_count_naive_start below 100 of 300, or the buffer-snapshot-discard procedure producing any wrong gap-free book.

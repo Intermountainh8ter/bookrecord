@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: three start-up orderings of snapshot and buffered diffs, counting gap-free but wrong final books.
+    Startupcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 300)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1594,6 +1603,91 @@ fn snapshotcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- startupcheck: start-up ordering of snapshot and buffered diffs; gap-free but wrong books ----
+
+const START_EVENTS: u64 = 100;
+const START_LEVELS: u64 = 40;
+const START_MAX_DELAY: u64 = 50;
+
+/// True when the applied update IDs form an unbroken chain (each starts at the previous id plus one).
+fn id_chain_ok(ids: &[u64]) -> bool {
+    ids.windows(2).all(|w| w[1] == w[0] + 1)
+}
+
+/// Returns per procedure (gap check passed, final book equals ground truth):
+/// [snapshot-first, subscribe-then-snapshot without discard, buffer-snapshot-discard].
+fn startup_trial(rng: &mut SplitMix) -> [(bool, bool); 3] {
+    let msgs: Vec<OrdMsg> = (1..=START_EVENTS)
+        .map(|s| (s, rng.below(START_LEVELS), if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 }))
+        .collect();
+    let delay = 1 + rng.below(START_MAX_DELAY);
+    let mut truth = BTreeMap::new();
+    for (_, l, q) in &msgs { ord_set(&mut truth, *l, *q); }
+    // the REST snapshot reflects every event with id <= delay
+    let mut snap = BTreeMap::new();
+    for (s, l, q) in &msgs { if *s <= delay { ord_set(&mut snap, *l, *q); } }
+    let th = ord_hash(&truth);
+    let run = |first_id: u64, discard: bool| -> (bool, bool) {
+        let mut book = snap.clone();
+        let mut ids = Vec::new();
+        for (s, l, q) in &msgs {
+            if *s < first_id || (discard && *s <= delay) { continue; }
+            ids.push(*s);
+            ord_set(&mut book, *l, *q);
+        }
+        (id_chain_ok(&ids), ord_hash(&book) == th)
+    };
+    [
+        run(delay + 1 + rng.below(START_MAX_DELAY), false), // stream joined after the snapshot: events in between are lost
+        run(1, false),                                      // buffered from the start, stale events replayed over the snapshot
+        run(1, true),                                       // buffered, events with u <= lastUpdateId discarded
+    ]
+}
+
+fn startupcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    // per procedure: [gap-free and wrong, gap-free and right, gap check failed]
+    let mut c = [[0u64; 3]; 3];
+    for _ in 0..trials {
+        for (i, (gap_ok, right)) in startup_trial(&mut rng).into_iter().enumerate() {
+            let k = if !gap_ok { 2 } else if right { 1 } else { 0 };
+            c[i][k] += 1;
+        }
+    }
+    let res = serde_json::json!({
+        "experiment": "startupcheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": START_EVENTS, "levels": START_LEVELS,
+                    "snapshot_delay_events": [1, START_MAX_DELAY],
+                    "note": "absolute-quantity single-id events; snapshot reflects events up to the delay; procedures differ only in which events are applied after it; gap check is the update-ID chain over applied events" },
+        "summary": {
+            "gapfree_but_wrong_count_snapshot_first": c[0][0],
+            "gapfree_but_wrong_count_naive_start": c[1][0],
+            "gapfree_but_wrong_count_buffer_discard": c[2][0],
+            "gapfree_and_right_count_snapshot_first": c[0][1],
+            "gapfree_and_right_count_naive_start": c[1][1],
+            "gapfree_and_right_count_buffer_discard": c[2][1],
+            "gap_check_failed_count_snapshot_first": c[0][2],
+            "gap_check_failed_count_naive_start": c[1][2],
+            "gap_check_failed_count_buffer_discard": c[2][2],
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- startupcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1613,6 +1707,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
+        Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
     }
 }
 
@@ -1766,6 +1861,22 @@ mod tests {
         snapshotcheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/snapshot_replace_hash_match_count_window8").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn startupcheck_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(startup_trial(&mut a), startup_trial(&mut b));
+        for seed in 0..20 {
+            let t = startup_trial(&mut SplitMix(seed));
+            assert_eq!(t[2], (true, true));
+        }
+        assert!(id_chain_ok(&[3, 4, 5]) && !id_chain_ok(&[3, 5]));
+        let out = std::env::temp_dir().join(format!("bookrecord-start-{}.json", std::process::id()));
+        startupcheck(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/gapfree_but_wrong_count_naive_start").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
