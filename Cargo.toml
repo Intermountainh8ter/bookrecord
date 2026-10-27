@@ -20,3 +20,5 @@ hex = "0.4"
 ureq = { version = "2", features = ["json"] }
 rust_decimal = { version = "1", features = ["serde"] }
 crc32fast = "1"
+
+[workspace]
