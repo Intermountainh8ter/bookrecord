@@ -71,3 +71,11 @@ Hypothesis: with sequence_num absent on 20 percent of messages and one message d
 Metric: /summary/silent_wrong_book_count_sequence_only. Expected: at least 30 of 200, expected_range [30, 200].
 
 Falsifier: fewer than 30 of 200 trials have a wrong final book with no sequence-only alarm, or the sequence-only detector raises an alarm on any clean control stream.
+
+## 2026-10-27T08:41:44Z heartbeat-delay proposal:973d8e83238c4bed6235a59b6558284f405184d59896533109103df4786807c7
+
+Hypothesis: with heartbeat loss probability 0.1 and 500 trials per interval H (10, 50, 200; seed 7; 2000 messages, one drop per trial), the number of trials at H=50 whose drop stays undetected for more than 50 messages (including never detected) lies between 30 and 75, because a lost next heartbeat doubles the delay. It differs from seqcheck, which counts wrong final books rather than time to detect.
+
+Metric: /summary/undetected_over_one_interval_count_h50. Expected: roughly 50 of 500, expected_range [30, 75].
+
+Falsifier: a count at H=50 below 30 or above 75 of 500 trials, or any trial detected after more than one interval with no heartbeat lost.

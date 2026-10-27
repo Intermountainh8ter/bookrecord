@@ -1,0 +1,58 @@
+{
+  "experiment": "heartbeatdelay",
+  "params": {
+    "heartbeat_intervals": [
+      10,
+      50,
+      200
+    ],
+    "heartbeat_loss_pct": 10,
+    "messages_per_trial": 2000,
+    "note": "one message dropped per trial; a heartbeat after every H-th message carries the sent count and is lost independently; delay counts messages from the drop to the first received heartbeat; over means delay above H or never detected",
+    "seed": 7,
+    "trials_per_interval": 500
+  },
+  "per_interval": {
+    "h10": {
+      "never": 1,
+      "over": 46
+    },
+    "h200": {
+      "never": 5,
+      "over": 50
+    },
+    "h50": {
+      "never": 3,
+      "over": 64
+    }
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- heartbeatdelay --seed 7 --trials 500 --out results/48-heartbeat-delay.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:41:59Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "max_detected_delay_messages_h10": 28,
+    "max_detected_delay_messages_h200": 585,
+    "max_detected_delay_messages_h50": 143,
+    "never_detected_count_h10": 1,
+    "never_detected_count_h200": 5,
+    "never_detected_count_h50": 3,
+    "over_interval_without_lost_heartbeat_count_h10": 0,
+    "over_interval_without_lost_heartbeat_count_h200": 0,
+    "over_interval_without_lost_heartbeat_count_h50": 0,
+    "undetected_over_one_interval_count_h10": 46,
+    "undetected_over_one_interval_count_h200": 50,
+    "undetected_over_one_interval_count_h50": 64
+  }
+}

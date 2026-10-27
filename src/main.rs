@@ -132,6 +132,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: one dropped message per trial, with a lossy sent-count heartbeat every H messages; counts detection delays beyond one interval.
+    Heartbeatdelay {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 500)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -1494,6 +1503,75 @@ fn seqcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- heartbeatdelay: detection delay of a lossy sent-count heartbeat after one dropped message ----
+
+const HB_MESSAGES: u64 = 2000;
+const HB_LOSS_PCT: u64 = 10;
+const HB_INTERVALS: [u64; 3] = [10, 50, 200];
+
+/// One trial. Message number m (1-based) is dropped; a heartbeat after every `h`-th message carries the sent count and
+/// is lost with probability HB_LOSS_PCT percent. Returns (detection delay in messages if detected, first heartbeat after the drop was lost).
+fn hb_trial(rng: &mut SplitMix, h: u64) -> (Option<u64>, bool) {
+    let m = 1 + rng.below(HB_MESSAGES);
+    let lost: Vec<bool> = (0..HB_MESSAGES / h).map(|_| rng.below(100) < HB_LOSS_PCT).collect();
+    let mut first_lost = false;
+    let mut seen_first = false;
+    for (k, l) in lost.iter().enumerate() {
+        let n = (k as u64 + 1) * h;
+        if n < m { continue; }
+        if !seen_first { seen_first = true; first_lost = *l; }
+        if !*l { return (Some(n - m), first_lost); }
+    }
+    (None, first_lost)
+}
+
+fn heartbeatdelay(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut per = serde_json::Map::new();
+    let mut summary = serde_json::Map::new();
+    for h in HB_INTERVALS {
+        let (mut over, mut never, mut over_no_loss, mut max_delay) = (0u64, 0u64, 0u64, 0u64);
+        for _ in 0..trials {
+            let (d, first_lost) = hb_trial(&mut rng, h);
+            match d {
+                None => { never += 1; over += 1; }
+                Some(d) => {
+                    max_delay = max_delay.max(d);
+                    if d > h { over += 1; if !first_lost { over_no_loss += 1; } }
+                }
+            }
+        }
+        summary.insert(format!("undetected_over_one_interval_count_h{h}"), over.into());
+        summary.insert(format!("never_detected_count_h{h}"), never.into());
+        summary.insert(format!("over_interval_without_lost_heartbeat_count_h{h}"), over_no_loss.into());
+        summary.insert(format!("max_detected_delay_messages_h{h}"), max_delay.into());
+        per.insert(format!("h{h}"), serde_json::json!({ "over": over, "never": never }));
+    }
+    let res = serde_json::json!({
+        "experiment": "heartbeatdelay",
+        "params": { "seed": seed, "trials_per_interval": trials, "messages_per_trial": HB_MESSAGES,
+                    "heartbeat_intervals": HB_INTERVALS, "heartbeat_loss_pct": HB_LOSS_PCT,
+                    "note": "one message dropped per trial; a heartbeat after every H-th message carries the sent count and is lost independently; delay counts messages from the drop to the first received heartbeat; over means delay above H or never detected" },
+        "per_interval": per,
+        "summary": summary,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- heartbeatdelay --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- ordercheck: sequence-drop recorder vs keyed per-level guard under reorder and duplicates ----
 
 const ORD_EVENTS: u64 = 1000;
@@ -1802,6 +1880,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
         Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
         Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
+        Cmd::Heartbeatdelay { seed, trials, out } => heartbeatdelay(seed, trials, &out),
     }
 }
 
@@ -1942,6 +2021,21 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn heartbeatdelay_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(hb_trial(&mut a, 50), hb_trial(&mut b, 50));
+        for seed in 0..200 {
+            let (d, first_lost) = hb_trial(&mut SplitMix(seed), 50);
+            if let Some(d) = d { assert!(d < 50 || first_lost); }
+        }
+        let out = std::env::temp_dir().join(format!("bookrecord-hb-{}.json", std::process::id()));
+        heartbeatdelay(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/undetected_over_one_interval_count_h50").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
