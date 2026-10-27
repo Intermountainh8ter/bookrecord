@@ -60,6 +60,12 @@ Reproduce: `cargo run --locked -q --release -- depthcheck --seed 7 --trials 500 
 
 Reproduce: `cargo run --locked -q --release -- latencycheck --seed 7 --trials 500 --out results/39-snapshot-detection-latency.json`
 
+## Defect classes and clean controls (synthetic, seed 7)
+
+`bookrecord classcheck` injects one chain-clean defect per trial (500 trials per class, rank uniform 1 to 50, 4000-event stream) of three classes (dropped delete, dropped insert, dropped quantity change), and runs 500 defect-free control streams through the same three detectors. Result in `results/40-defect-class-controls.json`: the top-10 CRC32 caught 105 of 500 dropped deletes, 94 of 500 dropped inserts and 111 of 500 dropped quantity changes; the snapshot comparison every 500 events caught 437, 409 and 425 of 500; the update-ID chain caught 0 in every class. Across the 500 clean controls the three detectors raised 0 alarms in total. The pre-registered expectation (0 false positives, at least 75 of 500 top-10 CRC32 catches for dropped insert and dropped quantity change) held. The controls share the harness with the injected trials, so a zero shows the detectors do not misfire on a faithful copy, not that real feeds are free of false alarms. The stream is synthetic; this says nothing about how often real feeds produce such defects.
+
+Reproduce: `cargo run --locked -q --release -- classcheck --seed 7 --trials 500 --out results/40-defect-class-controls.json`
+
 ## License
 
 MIT.

@@ -23,3 +23,11 @@ Hypothesis: on the seeded synthetic stream (seed 7, 500 trials per cadence, cade
 Metric: /detection/updates_to_catch_p95_by_cadence/500. Expected: at most 500, expected_range [1, 500].
 
 Falsifier: a p95 above 500 at cadence 500 (harness error), or an undetected-at-end count of zero at every cadence.
+
+## 2026-10-27T07:59:28Z defect-class-controls proposal:2535fe10437a90c5ee042e738ca2d1b9c701516f97d880b3519ac22887c88292
+
+Hypothesis: on 500 defect-free seeded control streams (seed 7, 4000 events each) none of the update-ID chain, top-10 CRC32 or every-500-event snapshot comparison raises an alarm (0 false positives in total), while the dropped-insert and dropped-quantity classes are each caught by the top-10 CRC32 in at least 15 percent of 500 trials per class.
+
+Metric: /clean_control/false_positive_count_total. Expected: equals 0, expected_range [0, 0].
+
+Falsifier: any alarm from any detector on a clean control stream (false_positive_count_total above 0), or a per-class top-10 CRC32 catch count below 75 of 500 for dropped-insert or dropped-quantity.

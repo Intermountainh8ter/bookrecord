@@ -71,6 +71,14 @@ enum Cmd {
         out: PathBuf,
     },
     /// Seeded synthetic experiment: updates from a chain-preserving dropped-delete defect to its catch by a periodic full snapshot comparison, per cadence.
+    Classcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 500)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     Latencycheck {
         #[arg(long, default_value_t = 7)]
         seed: u64,
@@ -1104,6 +1112,134 @@ fn latencycheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- classcheck: three chain-clean defect classes plus defect-free clean controls ----
+
+const CLASS_NAMES: [&str; 3] = ["dropped_delete", "dropped_insert", "dropped_quantity_change"];
+
+#[derive(Default, Clone, Copy)]
+struct ClassTrial { chain: bool, snapshot: bool, crc10: bool }
+
+/// One trial. `class` None is a clean control (nothing injected); Some(0|1|2) drops a delete, an insert or a quantity change
+/// at book rank 1-50 of a random side from the local book only.
+fn class_trial(rng: &mut SplitMix, class: Option<usize>) -> ClassTrial {
+    let mut truth = Book::default();
+    let mut local = Book::default();
+    let init = |rng: &mut SplitMix, bid: bool| -> Vec<(String, String)> {
+        let mut offs = std::collections::BTreeSet::new();
+        while offs.len() < 500 { offs.insert(rng.below(STALE_WINDOW)); }
+        offs.into_iter().map(|o| (stale_price(bid, o), format!("{}.00000000", 1 + rng.below(9)))).collect()
+    };
+    let (b, a) = (init(rng, true), init(rng, false));
+    truth.load(&b, &a).unwrap();
+    local.load(&b, &a).unwrap();
+    let rank = 1 + rng.below(DEPTH_MAX_RANK);
+    let inject_at = 100 + rng.below(900);
+    let mut t = ClassTrial::default();
+    let mut injected = false;
+    let mut last_id = 1000u64;
+    for i in 1..=STALE_EVENTS {
+        let first_id = last_id + 1;
+        if !chain_ok(last_id, first_id) { t.chain = true; }
+        last_id = first_id + rng.below(3);
+        let bid = rng.below(2) == 0;
+        let mut ch_t: Vec<(String, String)> = Vec::new();
+        let mut ch_l: Vec<(String, String)> = Vec::new();
+        if let (Some(c), true) = (class, i == inject_at) {
+            let k = (rank - 1) as usize;
+            let side = if bid { &truth.bids } else { &truth.asks };
+            let price = if bid { side.keys().rev().nth(k).copied() } else { side.keys().nth(k).copied() }.unwrap();
+            let one = Decimal::ONE;
+            match c {
+                0 => ch_t.push((price.to_string(), "0".into())),
+                1 => {
+                    let mut p = price;
+                    while side.contains_key(&p) { p = if bid { p - one } else { p + one }; }
+                    ch_t.push((p.to_string(), "5.00000000".into()));
+                }
+                _ => {
+                    let q = side[&price];
+                    let nq = if q >= Decimal::from(9) { Decimal::ONE } else { q + one };
+                    ch_t.push((price.to_string(), nq.to_string()));
+                }
+            }
+            injected = true;
+        } else {
+            for _ in 0..(1 + rng.below(2)) {
+                let off = rng.below(STALE_WINDOW);
+                let p = stale_price(bid, off);
+                let pd: Decimal = p.parse().unwrap();
+                let present = if bid { truth.bids.contains_key(&pd) } else { truth.asks.contains_key(&pd) };
+                let len = if bid { truth.bids.len() } else { truth.asks.len() };
+                let q = if present && len > 100 && rng.below(2) == 0 { "0".to_string() } else { format!("{}.00000000", 1 + rng.below(9)) };
+                ch_t.push((p.clone(), q.clone()));
+                ch_l.push((p, q));
+            }
+        }
+        let (bt, at) = if bid { (ch_t.as_slice(), &[][..]) } else { (&[][..], ch_t.as_slice()) };
+        let (bl, al) = if bid { (ch_l.as_slice(), &[][..]) } else { (&[][..], ch_l.as_slice()) };
+        truth.apply(bt, at).unwrap();
+        local.apply(bl, al).unwrap();
+        if injected || class.is_none() {
+            let same = truth.bids == local.bids && truth.asks == local.asks;
+            if kraken_checksum_depth(&truth, 2, 8, 10) != kraken_checksum_depth(&local, 2, 8, 10) { t.crc10 = true; }
+            if i % STALE_SNAPSHOT_EVERY == 0 && !same { t.snapshot = true; }
+        }
+    }
+    t
+}
+
+fn classcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut classes = serde_json::Map::new();
+    for (c, name) in CLASS_NAMES.iter().enumerate() {
+        let (mut chain, mut snap, mut c10) = (0u64, 0u64, 0u64);
+        for _ in 0..trials {
+            let t = class_trial(&mut rng, Some(c));
+            chain += t.chain as u64;
+            snap += t.snapshot as u64;
+            c10 += t.crc10 as u64;
+        }
+        classes.insert(name.to_string(), serde_json::json!({
+            "trials": trials,
+            "catch_count": { "update_id_chain": chain, "crc32_top10": c10, "snapshot_every_500": snap },
+        }));
+    }
+    let (mut chain, mut snap, mut c10) = (0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let t = class_trial(&mut rng, None);
+        chain += t.chain as u64;
+        snap += t.snapshot as u64;
+        c10 += t.crc10 as u64;
+    }
+    let res = serde_json::json!({
+        "experiment": "classcheck",
+        "params": { "seed": seed, "trials_per_class": trials, "events_per_trial": STALE_EVENTS, "snapshot_every": STALE_SNAPSHOT_EVERY,
+                    "levels_per_side_initial": 500, "price_window_ticks": STALE_WINDOW, "defect_depth": "uniform over ranks 1-50 of a random side",
+                    "note": "dropped insert adds a level absent from the local book at the first free tick beyond the chosen rank; dropped quantity change alters the quantity of the level at the chosen rank in truth only; clean controls inject nothing and run all three detectors for the whole stream" },
+        "by_class": classes,
+        "clean_control": {
+            "trials": trials,
+            "false_positive_count": { "update_id_chain": chain, "crc32_top10": c10, "snapshot_every_500": snap },
+            "false_positive_count_total": chain + c10 + snap
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- classcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["clean_control"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1119,6 +1255,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Stalecheck { seed, defects, out } => stalecheck(seed, defects, &out),
         Cmd::Depthcheck { seed, trials, out } => depthcheck(seed, trials, &out),
         Cmd::Latencycheck { seed, trials, out } => latencycheck(seed, trials, &out),
+        Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
     }
 }
 
@@ -1215,6 +1352,23 @@ mod tests {
         latencycheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/detection/updates_to_catch_p95_by_cadence/500").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn classcheck_is_deterministic_and_pointer_resolves() {
+        for c in [None, Some(0), Some(1), Some(2)] {
+            let mut a = SplitMix(7);
+            let mut b = SplitMix(7);
+            let (x, y) = (class_trial(&mut a, c), class_trial(&mut b, c));
+            assert!(!x.chain);
+            assert_eq!((x.crc10, x.snapshot), (y.crc10, y.snapshot));
+            if c.is_none() { assert!(!x.crc10 && !x.snapshot); }
+        }
+        let out = std::env::temp_dir().join(format!("bookrecord-class-{}.json", std::process::id()));
+        classcheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/clean_control/false_positive_count_total").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

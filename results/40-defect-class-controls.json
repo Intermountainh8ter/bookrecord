@@ -1,0 +1,63 @@
+{
+  "by_class": {
+    "dropped_delete": {
+      "catch_count": {
+        "crc32_top10": 105,
+        "snapshot_every_500": 437,
+        "update_id_chain": 0
+      },
+      "trials": 500
+    },
+    "dropped_insert": {
+      "catch_count": {
+        "crc32_top10": 94,
+        "snapshot_every_500": 409,
+        "update_id_chain": 0
+      },
+      "trials": 500
+    },
+    "dropped_quantity_change": {
+      "catch_count": {
+        "crc32_top10": 111,
+        "snapshot_every_500": 425,
+        "update_id_chain": 0
+      },
+      "trials": 500
+    }
+  },
+  "clean_control": {
+    "false_positive_count": {
+      "crc32_top10": 0,
+      "snapshot_every_500": 0,
+      "update_id_chain": 0
+    },
+    "false_positive_count_total": 0,
+    "trials": 500
+  },
+  "experiment": "classcheck",
+  "params": {
+    "defect_depth": "uniform over ranks 1-50 of a random side",
+    "events_per_trial": 1500,
+    "levels_per_side_initial": 500,
+    "note": "dropped insert adds a level absent from the local book at the first free tick beyond the chosen rank; dropped quantity change alters the quantity of the level at the chosen rank in truth only; clean controls inject nothing and run all three detectors for the whole stream",
+    "price_window_ticks": 1000,
+    "seed": 7,
+    "snapshot_every": 500,
+    "trials_per_class": 500
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- classcheck --seed 7 --trials 500 --out results/40-defect-class-controls.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T08:00:17Z",
+    "wall_s": 56.0
+  }
+}
