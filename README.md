@@ -48,6 +48,12 @@ Rendered by `bookrecord report` from `results/*.manifest.json` and `results/*.ve
 
 Reproduce: `cargo run --locked -q --release -- stalecheck --seed 7 --defects 200 --out results/35-stale-level-detection.json`
 
+## Depth-resolved detection (synthetic, seed 7)
+
+`bookrecord depthcheck` injects one chain-clean dropped-delete defect per trial (500 trials) at a book depth rank drawn uniformly from 1 to 50, into the same seeded synthetic stream, with ordinary book churn continuing afterwards. Result in `results/38-depth-resolved-detection.json`: the update-ID chain caught 0 of 500, a CRC32 over the top 10 levels caught 105 of 500 (rate 0.21), a CRC32 over the top 25 caught 263 of 500 (rate 0.526), and a full snapshot comparison every 500 events caught 437 of 500 (rate 0.874). Of 95 trials injected at ranks 1 to 10, the top-10 checksum caught 95; it also caught 10 trials injected at ranks above 10. The top-25 checksum caught 251 of 251 trials at ranks 1 to 25 and 12 trials above rank 25. The pre-registered falsifier (a top-10 catch at a rank above 10) fired, so the strict hypothesis is refuted: later churn moves a stale level into the checksummed window. The stream is synthetic; this says nothing about how often real feeds produce such defects.
+
+Reproduce: `cargo run --locked -q --release -- depthcheck --seed 7 --trials 500 --out results/38-depth-resolved-detection.json`
+
 ## License
 
 MIT.

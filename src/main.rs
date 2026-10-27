@@ -61,6 +61,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: detection of chain-preserving dropped-delete defects as a function of the defect's book depth rank (1-50).
+    Depthcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 500)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -362,6 +371,10 @@ fn kraken_precision(symbol: &str) -> anyhow::Result<(u32, u32)> {
 /// format price and qty with the pair's decimals, drop the decimal point and leading zeros,
 /// concatenate everything, CRC32.
 fn kraken_checksum(book: &Book, price_dec: u32, qty_dec: u32) -> u32 {
+    kraken_checksum_depth(book, price_dec, qty_dec, 10)
+}
+
+fn kraken_checksum_depth(book: &Book, price_dec: u32, qty_dec: u32, depth: usize) -> u32 {
     let fmt = |d: &Decimal, dec: u32| -> String {
         let s = format!("{:.*}", dec as usize, d);
         let s = s.replace('.', "");
@@ -369,11 +382,11 @@ fn kraken_checksum(book: &Book, price_dec: u32, qty_dec: u32) -> u32 {
         if t.is_empty() { "0".to_string() } else { t.to_string() }
     };
     let mut buf = String::new();
-    for (p, q) in book.asks.iter().take(10) {
+    for (p, q) in book.asks.iter().take(depth) {
         buf.push_str(&fmt(p, price_dec));
         buf.push_str(&fmt(q, qty_dec));
     }
-    for (p, q) in book.bids.iter().rev().take(10) {
+    for (p, q) in book.bids.iter().rev().take(depth) {
         buf.push_str(&fmt(p, price_dec));
         buf.push_str(&fmt(q, qty_dec));
     }
@@ -828,6 +841,145 @@ fn stalecheck(seed: u64, defects: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- depthcheck: dropped-delete defect at a chosen depth rank, checksum depth 10 versus 25 ----
+
+const DEPTH_MAX_RANK: u64 = 50;
+
+#[derive(Default, Clone, Copy)]
+struct DepthTrial { rank: u64, chain: bool, snapshot: bool, crc10: bool, crc25: bool }
+
+/// One trial: the delete at `rank` (1 = best level) of a random side is applied to truth only.
+fn depth_trial(rng: &mut SplitMix) -> DepthTrial {
+    let mut truth = Book::default();
+    let mut local = Book::default();
+    let init = |rng: &mut SplitMix, bid: bool| -> Vec<(String, String)> {
+        let mut offs = std::collections::BTreeSet::new();
+        while offs.len() < 500 { offs.insert(rng.below(STALE_WINDOW)); }
+        offs.into_iter().map(|o| (stale_price(bid, o), format!("{}.00000000", 1 + rng.below(9)))).collect()
+    };
+    let (b, a) = (init(rng, true), init(rng, false));
+    truth.load(&b, &a).unwrap();
+    local.load(&b, &a).unwrap();
+    let rank = 1 + rng.below(DEPTH_MAX_RANK);
+    let inject_at = 100 + rng.below(900);
+    let mut t = DepthTrial { rank, ..Default::default() };
+    let mut injected = false;
+    let mut last_id = 1000u64;
+    for i in 1..=STALE_EVENTS {
+        let first_id = last_id + 1;
+        last_id = first_id + rng.below(3);
+        if injected && !chain_ok(first_id - 1, first_id) { t.chain = true; }
+        let bid = rng.below(2) == 0;
+        let mut ch_t: Vec<(String, String)> = Vec::new();
+        let mut ch_l: Vec<(String, String)> = Vec::new();
+        if i == inject_at {
+            let k = (rank - 1) as usize;
+            let price = if bid { truth.bids.keys().rev().nth(k).copied() } else { truth.asks.keys().nth(k).copied() }.unwrap();
+            ch_t.push((price.to_string(), "0".into()));
+            injected = true;
+        } else {
+            for _ in 0..(1 + rng.below(2)) {
+                let off = rng.below(STALE_WINDOW);
+                let p = stale_price(bid, off);
+                let pd: Decimal = p.parse().unwrap();
+                let present = if bid { truth.bids.contains_key(&pd) } else { truth.asks.contains_key(&pd) };
+                let len = if bid { truth.bids.len() } else { truth.asks.len() };
+                let q = if present && len > 100 && rng.below(2) == 0 { "0".to_string() } else { format!("{}.00000000", 1 + rng.below(9)) };
+                ch_t.push((p.clone(), q.clone()));
+                ch_l.push((p, q));
+            }
+        }
+        let (bt, at) = if bid { (ch_t.as_slice(), &[][..]) } else { (&[][..], ch_t.as_slice()) };
+        let (bl, al) = if bid { (ch_l.as_slice(), &[][..]) } else { (&[][..], ch_l.as_slice()) };
+        truth.apply(bt, at).unwrap();
+        local.apply(bl, al).unwrap();
+        if injected {
+            let same = truth.bids == local.bids && truth.asks == local.asks;
+            if kraken_checksum_depth(&truth, 2, 8, 10) != kraken_checksum_depth(&local, 2, 8, 10) { t.crc10 = true; }
+            if kraken_checksum_depth(&truth, 2, 8, 25) != kraken_checksum_depth(&local, 2, 8, 25) { t.crc25 = true; }
+            if i % STALE_SNAPSHOT_EVERY == 0 && !same { t.snapshot = true; }
+        }
+    }
+    t
+}
+
+fn utc_now() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+fn depthcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut chain, mut snap, mut c10, mut c25) = (0u64, 0u64, 0u64, 0u64);
+    // index 0 = rank 1
+    let mut inj = vec![0u64; DEPTH_MAX_RANK as usize];
+    let mut hit10 = vec![0u64; DEPTH_MAX_RANK as usize];
+    let mut hit25 = vec![0u64; DEPTH_MAX_RANK as usize];
+    let (mut c10_in, mut c10_out, mut c25_in, mut c25_out) = (0u64, 0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let t = depth_trial(&mut rng);
+        let r = (t.rank - 1) as usize;
+        inj[r] += 1;
+        chain += t.chain as u64;
+        snap += t.snapshot as u64;
+        c10 += t.crc10 as u64;
+        c25 += t.crc25 as u64;
+        hit10[r] += t.crc10 as u64;
+        hit25[r] += t.crc25 as u64;
+        if t.rank <= 10 { c10_in += t.crc10 as u64 } else { c10_out += t.crc10 as u64 }
+        if t.rank <= 25 { c25_in += t.crc25 as u64 } else { c25_out += t.crc25 as u64 }
+    }
+    let n_le = |k: u64| inj.iter().take(k as usize).sum::<u64>();
+    let rate = |n: u64| if trials == 0 { 0.0 } else { n as f64 / trials as f64 };
+    let res = serde_json::json!({
+        "experiment": "depthcheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": STALE_EVENTS, "snapshot_every": STALE_SNAPSHOT_EVERY,
+                    "levels_per_side_initial": 500, "price_window_ticks": STALE_WINDOW, "defect_depth": "uniform over ranks 1-50 of a random side",
+                    "note": "one defect per independent trial; the chain check cannot fire by construction because the defect changes no update ID" },
+        "detection": {
+            "trials": trials,
+            "catch_count_by_depth": { "update_id_chain": chain, "snapshot_every_500": snap, "crc32_top10": c10, "crc32_top25": c25 },
+            "rate_by_check": { "update_id_chain": rate(chain), "snapshot_every_500": rate(snap), "crc32_top10": rate(c10), "crc32_top25": rate(c25) },
+            "injected_at_rank_le_10": n_le(10),
+            "injected_at_rank_le_25": n_le(25),
+            "crc32_top10_catches_rank_le_10": c10_in,
+            "crc32_top10_catches_rank_gt_10": c10_out,
+            "crc32_top25_catches_rank_le_25": c25_in,
+            "crc32_top25_catches_rank_gt_25": c25_out,
+            "injected_by_rank": inj,
+            "crc32_top10_catches_by_rank": hit10,
+            "crc32_top25_catches_by_rank": hit25
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- depthcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "n/a, generated by the code" },
+                { "url": "https://docs.kraken.com/exchange/guides/websockets/book-checksum-v2.md", "license": "vendor documentation, read only for checksum depth (top 10)" },
+                { "url": "https://docs.bitfinex.com/docs/ws-websocket-checksum", "license": "vendor documentation, read only for checksum depth (top 25)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["detection"]["catch_count_by_depth"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -841,6 +993,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Verify { capture } => verify(&capture),
         Cmd::Report { dir, readme } => report(&dir, &readme),
         Cmd::Stalecheck { seed, defects, out } => stalecheck(seed, defects, &out),
+        Cmd::Depthcheck { seed, trials, out } => depthcheck(seed, trials, &out),
     }
 }
 
@@ -904,6 +1057,36 @@ mod tests {
             assert_eq!((x.snapshot, x.crc), (y.snapshot, y.crc));
         }
         assert!(chain_ok(10, 11) && !chain_ok(10, 12));
+    }
+
+    #[test]
+    fn depthcheck_is_deterministic_and_pointer_resolves() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        for _ in 0..5 {
+            let (x, y) = (depth_trial(&mut a), depth_trial(&mut b));
+            assert!(!x.chain);
+            assert_eq!((x.rank, x.crc10, x.crc25, x.snapshot), (y.rank, y.crc10, y.crc25, y.snapshot));
+            assert!((1..=DEPTH_MAX_RANK).contains(&x.rank));
+        }
+        let out = std::env::temp_dir().join(format!("bookrecord-depth-{}.json", std::process::id()));
+        depthcheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/detection/catch_count_by_depth/crc32_top10").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn checksum_depth_controls_which_ranks_are_covered() {
+        let mut t = Book::default();
+        let mut l = Book::default();
+        let bids: Vec<(String, String)> = (0..30).map(|i| ((99_999 - i).to_string(), "1.00000000".into())).collect();
+        let asks: Vec<(String, String)> = (0..30).map(|i| ((100_001 + i).to_string(), "1.00000000".into())).collect();
+        t.load(&bids, &asks).unwrap();
+        l.load(&bids, &asks).unwrap();
+        t.apply(&[((99_999 - 14).to_string(), "0".into())], &[]).unwrap(); // rank 15 bid
+        assert_eq!(kraken_checksum_depth(&t, 2, 8, 10), kraken_checksum_depth(&l, 2, 8, 10));
+        assert_ne!(kraken_checksum_depth(&t, 2, 8, 25), kraken_checksum_depth(&l, 2, 8, 25));
     }
 
     #[test]
