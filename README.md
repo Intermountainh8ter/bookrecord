@@ -42,6 +42,12 @@ No keys are needed for any of these public streams.
 Rendered by `bookrecord report` from `results/*.manifest.json` and `results/*.verify.json`; capture files are not committed, their hashes are.
 <!-- RESULTS:END -->
 
+## Stale-level detection (synthetic, seed 7)
+
+`bookrecord stalecheck` injects 200 dropped-delete defects, one per independent trial, into a seeded synthetic diff stream. The defect leaves the update-ID chain intact. Result in `results/35-stale-level-detection.json`: the update-ID chain check detected 0 of 200 (rate 0.0, by construction), the CRC32 over the top ten levels detected 200 of 200 (rate 1.0), and a full snapshot comparison every 500 events detected 170 of 200 (rate 0.85). The pre-registered expectation of at least 0.90 for the snapshot check was not met. The stream is synthetic; this says nothing about how often real feeds produce such defects.
+
+Reproduce: `cargo run --locked -q --release -- stalecheck --seed 7 --defects 200 --out results/35-stale-level-detection.json`
+
 ## License
 
 MIT.

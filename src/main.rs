@@ -52,6 +52,15 @@ enum Cmd {
     Verify {
         capture: PathBuf,
     },
+    /// Seeded synthetic experiment: detection rate of chain, snapshot and checksum checks on chain-preserving dropped-delete defects.
+    Stalecheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        defects: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -679,6 +688,146 @@ fn verify(capture: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- stalecheck: synthetic dropped-delete defects that keep the update-ID chain intact ----
+
+struct SplitMix(u64);
+impl SplitMix {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn below(&mut self, n: u64) -> u64 { self.next() % n }
+}
+
+const STALE_EVENTS: u64 = 1500;
+const STALE_SNAPSHOT_EVERY: u64 = 500;
+const STALE_WINDOW: u64 = 1000;
+const STALE_MID: u64 = 100_000;
+
+fn stale_price(bid: bool, off: u64) -> String {
+    if bid { (STALE_MID - 1 - off).to_string() } else { (STALE_MID + 1 + off).to_string() }
+}
+
+/// Binance rule for synced events: first_id must equal previous last_id + 1.
+fn chain_ok(prev_last: u64, first_id: u64) -> bool { first_id == prev_last + 1 }
+
+#[derive(Default, Clone, Copy)]
+struct StaleTrial { chain: bool, snapshot: bool, crc: bool, healed_undetected: bool }
+
+fn stale_trial(rng: &mut SplitMix) -> StaleTrial {
+    let mut truth = Book::default();
+    let mut local = Book::default();
+    let init = |rng: &mut SplitMix, bid: bool| -> Vec<(String, String)> {
+        let mut offs = std::collections::BTreeSet::new();
+        while offs.len() < 500 { offs.insert(rng.below(STALE_WINDOW)); }
+        offs.into_iter().map(|o| (stale_price(bid, o), format!("{}.00000000", 1 + rng.below(9)))).collect()
+    };
+    let (b, a) = (init(rng, true), init(rng, false));
+    truth.load(&b, &a).unwrap();
+    local.load(&b, &a).unwrap();
+    let inject_at = 100 + rng.below(900);
+    let mut t = StaleTrial::default();
+    let mut injected = false;
+    let mut diverged = false;
+    let mut last_id = 1000u64;
+    for i in 1..=STALE_EVENTS {
+        let first_id = last_id + 1;
+        last_id = first_id + rng.below(3);
+        if i > 1 && !chain_ok(first_id - 1, first_id) && !t.chain { t.chain = injected; }
+        let bid = rng.below(2) == 0;
+        let mut ch_t: Vec<(String, String)> = Vec::new();
+        let mut ch_l: Vec<(String, String)> = Vec::new();
+        if i == inject_at {
+            // Delete one of the ten best levels in truth; the local copy never sees the delete.
+            let k = rng.below(10) as usize;
+            let price = if bid { truth.bids.keys().rev().nth(k).copied() } else { truth.asks.keys().nth(k).copied() }.unwrap();
+            ch_t.push((price.to_string(), "0".into()));
+            injected = true;
+        } else {
+            for _ in 0..(1 + rng.below(2)) {
+                let off = rng.below(STALE_WINDOW);
+                let p = stale_price(bid, off);
+                let pd: Decimal = p.parse().unwrap();
+                let present = if bid { truth.bids.contains_key(&pd) } else { truth.asks.contains_key(&pd) };
+                let len = if bid { truth.bids.len() } else { truth.asks.len() };
+                let q = if present && len > 100 && rng.below(2) == 0 { "0".to_string() } else { format!("{}.00000000", 1 + rng.below(9)) };
+                ch_t.push((p.clone(), q.clone()));
+                ch_l.push((p, q));
+            }
+        }
+        let (bt, at) = if bid { (ch_t.as_slice(), &[][..]) } else { (&[][..], ch_t.as_slice()) };
+        let (bl, al) = if bid { (ch_l.as_slice(), &[][..]) } else { (&[][..], ch_l.as_slice()) };
+        truth.apply(bt, at).unwrap();
+        local.apply(bl, al).unwrap();
+        if injected {
+            let same = truth.bids == local.bids && truth.asks == local.asks;
+            if !same { diverged = true; }
+            if diverged && same && !t.crc && !t.snapshot { t.healed_undetected = true; }
+            if kraken_checksum(&truth, 2, 8) != kraken_checksum(&local, 2, 8) { t.crc = true; }
+            if i % STALE_SNAPSHOT_EVERY == 0 && !same { t.snapshot = true; }
+        }
+    }
+    t
+}
+
+fn stalecheck(seed: u64, defects: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+        let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+        // civil-from-days (Howard Hinnant)
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+        format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    };
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut chain, mut snap, mut crc, mut healed) = (0u64, 0u64, 0u64, 0u64);
+    for _ in 0..defects {
+        let t = stale_trial(&mut rng);
+        chain += t.chain as u64;
+        snap += t.snapshot as u64;
+        crc += t.crc as u64;
+        healed += t.healed_undetected as u64;
+    }
+    let rate = |n: u64| if defects == 0 { 0.0 } else { n as f64 / defects as f64 };
+    let res = serde_json::json!({
+        "experiment": "stalecheck",
+        "params": { "seed": seed, "defects": defects, "events_per_trial": STALE_EVENTS, "snapshot_every": STALE_SNAPSHOT_EVERY,
+                    "levels_per_side_initial": 500, "price_window_ticks": STALE_WINDOW, "defect_depth": "uniform over the best ten levels of a random side",
+                    "crc_levels": 10, "note": "one defect per independent trial; the chain check cannot fire by construction because the defect changes no update ID" },
+        "detection": {
+            "defects": defects,
+            "detected": { "update_id_chain": chain, "snapshot_every_500": snap, "crc32_top10": crc },
+            "rate_by_check": { "update_id_chain": rate(chain), "snapshot_every_500": rate(snap), "crc32_top10": rate(crc) },
+            "healed_before_any_detection": healed
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- stalecheck --seed {seed} --defects {defects} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "n/a, generated by the code" },
+                { "url": "https://developers.binance.com/docs/derivatives/options-trading/websocket-market-streams/How-to-manage-a-local-order-book-correctly", "license": "public vendor documentation, rule description only" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["detection"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -691,6 +840,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Cmd::Verify { capture } => verify(&capture),
         Cmd::Report { dir, readme } => report(&dir, &readme),
+        Cmd::Stalecheck { seed, defects, out } => stalecheck(seed, defects, &out),
     }
 }
 
@@ -742,5 +892,29 @@ mod tests {
         w.finish().unwrap();
         // verify exits the process on inconsistency; a consistent file returns Ok.
         verify(&path).unwrap();
+    }
+
+    #[test]
+    fn stalecheck_is_deterministic_and_chain_blind() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        for _ in 0..5 {
+            let (x, y) = (stale_trial(&mut a), stale_trial(&mut b));
+            assert!(!x.chain);
+            assert_eq!((x.snapshot, x.crc), (y.snapshot, y.crc));
+        }
+        assert!(chain_ok(10, 11) && !chain_ok(10, 12));
+    }
+
+    #[test]
+    fn dropped_delete_changes_crc_of_top_levels() {
+        let mut t = Book::default();
+        let mut l = Book::default();
+        let bids: Vec<(String, String)> = (0..12).map(|i| ((99_999 - i).to_string(), "1.00000000".into())).collect();
+        let asks: Vec<(String, String)> = (0..12).map(|i| ((100_001 + i).to_string(), "1.00000000".into())).collect();
+        t.load(&bids, &asks).unwrap();
+        l.load(&bids, &asks).unwrap();
+        t.apply(&[("99999".into(), "0".into())], &[]).unwrap();
+        assert_ne!(kraken_checksum(&t, 2, 8), kraken_checksum(&l, 2, 8));
     }
 }
