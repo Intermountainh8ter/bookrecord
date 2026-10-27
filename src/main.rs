@@ -70,6 +70,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: updates from a chain-preserving dropped-delete defect to its catch by a periodic full snapshot comparison, per cadence.
+    Latencycheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 500)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Render `results/*.manifest.json` (+ matching `.verify.json`) into the README results block.
     Report {
         #[arg(long, default_value = "results")]
@@ -980,6 +989,121 @@ fn depthcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- latencycheck: updates from injection to catch by a periodic full snapshot comparison ----
+
+const LAT_EVENTS: u64 = 4000;
+const LAT_CADENCES: [u64; 5] = [100, 250, 500, 1000, 2000];
+
+/// One trial: returns, per cadence, `Some(updates since injection)` at the first comparison that finds a divergence.
+fn latency_trial(rng: &mut SplitMix) -> [Option<u64>; 5] {
+    let mut truth = Book::default();
+    let mut local = Book::default();
+    let init = |rng: &mut SplitMix, bid: bool| -> Vec<(String, String)> {
+        let mut offs = std::collections::BTreeSet::new();
+        while offs.len() < 500 { offs.insert(rng.below(STALE_WINDOW)); }
+        offs.into_iter().map(|o| (stale_price(bid, o), format!("{}.00000000", 1 + rng.below(9)))).collect()
+    };
+    let (b, a) = (init(rng, true), init(rng, false));
+    truth.load(&b, &a).unwrap();
+    local.load(&b, &a).unwrap();
+    let rank = 1 + rng.below(DEPTH_MAX_RANK);
+    let inject_at = 100 + rng.below(900);
+    let mut res = [None; 5];
+    let mut injected = false;
+    for i in 1..=LAT_EVENTS {
+        let bid = rng.below(2) == 0;
+        let mut ch_t: Vec<(String, String)> = Vec::new();
+        let mut ch_l: Vec<(String, String)> = Vec::new();
+        if i == inject_at {
+            let k = (rank - 1) as usize;
+            let price = if bid { truth.bids.keys().rev().nth(k).copied() } else { truth.asks.keys().nth(k).copied() }.unwrap();
+            ch_t.push((price.to_string(), "0".into()));
+            injected = true;
+        } else {
+            for _ in 0..(1 + rng.below(2)) {
+                let off = rng.below(STALE_WINDOW);
+                let p = stale_price(bid, off);
+                let pd: Decimal = p.parse().unwrap();
+                let present = if bid { truth.bids.contains_key(&pd) } else { truth.asks.contains_key(&pd) };
+                let len = if bid { truth.bids.len() } else { truth.asks.len() };
+                let q = if present && len > 100 && rng.below(2) == 0 { "0".to_string() } else { format!("{}.00000000", 1 + rng.below(9)) };
+                ch_t.push((p.clone(), q.clone()));
+                ch_l.push((p, q));
+            }
+        }
+        let (bt, at) = if bid { (ch_t.as_slice(), &[][..]) } else { (&[][..], ch_t.as_slice()) };
+        let (bl, al) = if bid { (ch_l.as_slice(), &[][..]) } else { (&[][..], ch_l.as_slice()) };
+        truth.apply(bt, at).unwrap();
+        local.apply(bl, al).unwrap();
+        if injected {
+            let same = truth.bids == local.bids && truth.asks == local.asks;
+            for (c, n) in LAT_CADENCES.iter().enumerate() {
+                if res[c].is_none() && i % n == 0 && !same { res[c] = Some(i - inject_at); }
+            }
+        }
+    }
+    res
+}
+
+fn p95(sorted: &[u64]) -> Option<u64> {
+    if sorted.is_empty() { return None; }
+    // nearest-rank: ceil(0.95 n)-th smallest
+    let idx = (sorted.len() * 95).div_ceil(100).max(1) - 1;
+    Some(sorted[idx])
+}
+
+fn latencycheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut caught: Vec<Vec<u64>> = vec![Vec::new(); LAT_CADENCES.len()];
+    for _ in 0..trials {
+        let r = latency_trial(&mut rng);
+        for (c, v) in r.iter().enumerate() {
+            if let Some(u) = v { caught[c].push(*u); }
+        }
+    }
+    let mut p95m = serde_json::Map::new();
+    let mut maxm = serde_json::Map::new();
+    let mut caughtm = serde_json::Map::new();
+    let mut undetm = serde_json::Map::new();
+    for (c, n) in LAT_CADENCES.iter().enumerate() {
+        caught[c].sort_unstable();
+        let k = n.to_string();
+        p95m.insert(k.clone(), serde_json::json!(p95(&caught[c])));
+        maxm.insert(k.clone(), serde_json::json!(caught[c].last()));
+        caughtm.insert(k.clone(), serde_json::json!(caught[c].len() as u64));
+        undetm.insert(k, serde_json::json!(trials - caught[c].len() as u64));
+    }
+    let res = serde_json::json!({
+        "experiment": "latencycheck",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": LAT_EVENTS, "cadences": LAT_CADENCES,
+                    "levels_per_side_initial": 500, "price_window_ticks": STALE_WINDOW, "defect_depth": "uniform over ranks 1-50 of a random side",
+                    "injection_event": "uniform over 100-999",
+                    "note": "updates_to_catch is the event index of the first comparison that finds divergence minus the injection index; percentiles are nearest-rank over caught trials only; undetected trials are counted separately" },
+        "detection": {
+            "trials": trials,
+            "updates_to_catch_p95_by_cadence": p95m,
+            "updates_to_catch_max_by_cadence": maxm,
+            "caught_by_cadence": caughtm,
+            "undetected_at_end_by_cadence": undetm
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- latencycheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["detection"])?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -994,6 +1118,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Report { dir, readme } => report(&dir, &readme),
         Cmd::Stalecheck { seed, defects, out } => stalecheck(seed, defects, &out),
         Cmd::Depthcheck { seed, trials, out } => depthcheck(seed, trials, &out),
+        Cmd::Latencycheck { seed, trials, out } => latencycheck(seed, trials, &out),
     }
 }
 
@@ -1073,6 +1198,23 @@ mod tests {
         depthcheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/detection/catch_count_by_depth/crc32_top10").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn latencycheck_is_deterministic_and_pointer_resolves() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        for _ in 0..3 {
+            assert_eq!(latency_trial(&mut a), latency_trial(&mut b));
+        }
+        assert_eq!(p95(&[]), None);
+        assert_eq!(p95(&[5]), Some(5));
+        assert_eq!(p95(&(1..=100).collect::<Vec<u64>>()), Some(95));
+        let out = std::env::temp_dir().join(format!("bookrecord-lat-{}.json", std::process::id()));
+        latencycheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/detection/updates_to_catch_p95_by_cadence/500").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

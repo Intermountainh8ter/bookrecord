@@ -15,3 +15,11 @@ Hypothesis: a CRC32 over the top 10 levels catches every injected chain-clean dr
 Metric: /detection/catch_count_by_depth/crc32_top10. Expected: at most 20 percent of trials (ranks uniform over 1-50), expected_range [0.0, 0.25].
 
 Falsifier: a top-10 CRC32 catch at any injected depth rank greater than 10, or a miss at any rank 1 to 10, refutes the hypothesis.
+
+## 2026-10-27T07:54:03Z snapshot-detection-latency proposal:6501381f9b8011638dc97c958bfc0c3aebdd11957e673c6ea8bb37b0d264f132
+
+Hypothesis: on the seeded synthetic stream (seed 7, 500 trials per cadence, cadences 100, 250, 500, 1000, 2000 events), the 95th percentile of updates from injection to detection by a periodic full snapshot comparison at cadence 500 is at most 500, and the count of defects undetected at stream end is above zero at every cadence because later churn can overwrite the stale level before the next comparison.
+
+Metric: /detection/updates_to_catch_p95_by_cadence/500. Expected: at most 500, expected_range [1, 500].
+
+Falsifier: a p95 above 500 at cadence 500 (harness error), or an undetected-at-end count of zero at every cadence.

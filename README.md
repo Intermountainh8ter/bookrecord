@@ -54,6 +54,12 @@ Reproduce: `cargo run --locked -q --release -- stalecheck --seed 7 --defects 200
 
 Reproduce: `cargo run --locked -q --release -- depthcheck --seed 7 --trials 500 --out results/38-depth-resolved-detection.json`
 
+## Snapshot-comparison latency (synthetic, seed 7)
+
+`bookrecord latencycheck` injects one chain-clean dropped-delete defect per trial (500 trials, rank uniform 1 to 50, 4000-event stream) and records the updates from injection to the first full snapshot comparison that finds the divergence, for cadences of 100, 250, 500, 1000 and 2000 events. Result in `results/39-snapshot-detection-latency.json`: at cadence 500 the 95th percentile was 447 updates (maximum 498), with 429 of 500 caught and 71 undetected at stream end. Undetected at stream end, by cadence: 16 at 100, 31 at 250, 130 at 1000, 345 at 2000. The pre-registered expectation (p95 at most 500 at cadence 500, undetected count above zero at each cadence) held. The upper bound is close to a property of the harness, since a comparison fires every cadence; the informative number is the undetected count, which shows later churn overwrote the stale level before a comparison in those trials. The stream is synthetic; this says nothing about how often real feeds produce such defects.
+
+Reproduce: `cargo run --locked -q --release -- latencycheck --seed 7 --trials 500 --out results/39-snapshot-detection-latency.json`
+
 ## License
 
 MIT.

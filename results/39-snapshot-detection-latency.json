@@ -1,0 +1,66 @@
+{
+  "detection": {
+    "caught_by_cadence": {
+      "100": 484,
+      "1000": 370,
+      "2000": 155,
+      "250": 469,
+      "500": 429
+    },
+    "trials": 500,
+    "undetected_at_end_by_cadence": {
+      "100": 16,
+      "1000": 130,
+      "2000": 345,
+      "250": 31,
+      "500": 71
+    },
+    "updates_to_catch_max_by_cadence": {
+      "100": 99,
+      "1000": 900,
+      "2000": 1880,
+      "250": 249,
+      "500": 498
+    },
+    "updates_to_catch_p95_by_cadence": {
+      "100": 94,
+      "1000": 839,
+      "2000": 1834,
+      "250": 236,
+      "500": 447
+    }
+  },
+  "experiment": "latencycheck",
+  "params": {
+    "cadences": [
+      100,
+      250,
+      500,
+      1000,
+      2000
+    ],
+    "defect_depth": "uniform over ranks 1-50 of a random side",
+    "events_per_trial": 4000,
+    "injection_event": "uniform over 100-999",
+    "levels_per_side_initial": 500,
+    "note": "updates_to_catch is the event index of the first comparison that finds divergence minus the injection index; percentiles are nearest-rank over caught trials only; undetected trials are counted separately",
+    "price_window_ticks": 1000,
+    "seed": 7,
+    "trials": 500
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- latencycheck --seed 7 --trials 500 --out results/39-snapshot-detection-latency.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-10-27T07:54:36Z",
+    "wall_s": 16.0
+  }
+}
