@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: strict jump-greater-than-one gap rule vs a reorder-tolerant hold-window rule on adjacent-swap reordered streams, with and without one drop.
+    Seqproduct {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 300)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: chain breaks hidden from the spot U/u range rule on a derivatives-style feed with `pu`, plus false restarts on unknown-level removals.
     Puchain {
         #[arg(long, default_value_t = 7)]
@@ -2006,6 +2015,100 @@ fn cadencecheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- seqproduct: strict jump>1 gap rule vs reorder-tolerant hold-window rule ----
+
+const SQP_MESSAGES: u64 = 500;
+const SQP_SWAP_P_PER_MILLE: u64 = 100;
+const SQP_HOLD: u64 = 4;
+
+/// Arrival order of sequence numbers 1..=n with non-overlapping adjacent swaps at 0.1 per position; optionally one seq dropped.
+fn sqp_stream(rng: &mut SplitMix, drop: Option<u64>) -> Vec<u64> {
+    let mut v: Vec<u64> = (1..=SQP_MESSAGES).collect();
+    let mut i = 0;
+    while i + 1 < v.len() {
+        if rng.below(1000) < SQP_SWAP_P_PER_MILLE { v.swap(i, i + 1); i += 2; } else { i += 1; }
+    }
+    if let Some(d) = drop { v.retain(|x| *x != d); }
+    v
+}
+
+/// Strict rule: a gap whenever a message's seq exceeds the previous arrival's seq by more than one.
+fn sqp_strict_gaps(stream: &[u64]) -> u64 {
+    let mut last = 0u64;
+    let mut gaps = 0;
+    for &q in stream { if q > last + 1 { gaps += 1; } last = q; }
+    gaps
+}
+
+/// Tolerant rule: a missing seq is a gap only once a message at least `SQP_HOLD` above it has arrived.
+fn sqp_tolerant_gaps(stream: &[u64]) -> u64 {
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut expected, mut max_seen, mut gaps) = (1u64, 0u64, 0u64);
+    for &q in stream {
+        seen.insert(q);
+        max_seen = max_seen.max(q);
+        loop {
+            if seen.contains(&expected) { expected += 1; }
+            else if max_seen >= expected + SQP_HOLD { gaps += 1; expected += 1; }
+            else { break; }
+        }
+    }
+    gaps
+}
+
+/// One trial: (strict false gaps > 0, tolerant false gaps > 0, drop position, strict detects drop, tolerant detects drop).
+fn sqp_trial(rng: &mut SplitMix) -> (bool, bool, u64, bool, bool) {
+    let clean = sqp_stream(rng, None);
+    let d = 1 + rng.below(SQP_MESSAGES);
+    let dropped = sqp_stream(rng, Some(d));
+    (sqp_strict_gaps(&clean) > 0, sqp_tolerant_gaps(&clean) > 0, d, sqp_strict_gaps(&dropped) > 0, sqp_tolerant_gaps(&dropped) > 0)
+}
+
+fn seqproduct(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut fs, mut ft, mut ds, mut dt, mut eligible, mut missed_tol_eligible) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (a, b, d, sd, td) = sqp_trial(&mut rng);
+        if a { fs += 1; }
+        if b { ft += 1; }
+        if sd { ds += 1; }
+        if td { dt += 1; }
+        if d + SQP_HOLD <= SQP_MESSAGES {
+            eligible += 1;
+            if !td { missed_tol_eligible += 1; }
+        }
+    }
+    let res = serde_json::json!({
+        "experiment": "seqproduct",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": SQP_MESSAGES, "swap_probability_per_position": 0.1,
+                    "hold_window": SQP_HOLD, "drop_position": "uniform over 1..=messages",
+                    "note": "the strict count is close to a property of the harness: any adjacent swap produces a jump of two. This measures the misclassification mechanism, not real-feed reorder rates." },
+        "summary": {
+            "false_gap_count_strict": fs,
+            "false_gap_count_tolerant": ft,
+            "drops_detected_strict": ds,
+            "drops_detected_tolerant": dt,
+            "drops_outside_last_window_count": eligible,
+            "drops_outside_last_window_missed_tolerant": missed_tol_eligible
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- seqproduct --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- puchain: spot range rule vs pu==previous-u rule on a derivatives-style feed ----
 
 const PU_EVENTS: usize = 300;
@@ -2310,6 +2413,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
@@ -2568,6 +2672,21 @@ mod tests {
         cadencecheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/false_stale_count_batched").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn seqproduct_is_deterministic_and_pointer_resolves() {
+        assert_eq!(sqp_trial(&mut SplitMix(7)), sqp_trial(&mut SplitMix(7)));
+        assert_eq!(sqp_strict_gaps(&[1, 2, 3]), 0);
+        assert_eq!(sqp_strict_gaps(&[2, 1, 3]), 2);
+        assert_eq!(sqp_tolerant_gaps(&[2, 1, 3, 4, 5]), 0);
+        assert_eq!(sqp_tolerant_gaps(&[1, 3, 4, 5, 6, 7]), 1);
+        assert_eq!(sqp_tolerant_gaps(&[1, 2, 3, 5]), 0);
+        let out = std::env::temp_dir().join(format!("bookrecord-sqp-{}.json", std::process::id()));
+        seqproduct(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/false_gap_count_strict").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

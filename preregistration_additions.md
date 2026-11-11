@@ -119,3 +119,11 @@ Hypothesis: a stall detector whose silence timeout is fixed at three times the m
 Metric: /summary/false_stale_count_batched. Expected: at least 100 of 200, expected_range [100, 200]; per-message false-stale count at most 10.
 
 Falsifier: false_stale_count_batched below 100 of 200 trials, or per-message false-stale count above 10 of 200.
+
+## 2026-11-11T10:05:35Z seqproduct proposal:27b74257e7a31a604318b738c007c3d491f945f1631896bc3aae24dc004f13ee
+
+Hypothesis: on 300 drop-free synthetic streams of 500 messages with adjacent-swap reordering at probability 0.1 per position (seed 7), the strict greater-than-one rule raises a false gap in at least 280 of 300 trials, while a reorder-tolerant rule with a hold window of 4 raises 0 false gaps; on 300 streams with exactly one drop and the same reordering, the tolerant rule detects every drop that is not in the last window of the stream.
+
+Metric: /summary/false_gap_count_strict. Expected: at least 280 of 300, expected_range [280, 300]; false_gap_count_tolerant equals 0.
+
+Falsifier: false_gap_count_strict below 280 of 300, or false_gap_count_tolerant above 0 on drop-free reordered streams.

@@ -1,0 +1,35 @@
+{
+  "experiment": "seqproduct",
+  "params": {
+    "drop_position": "uniform over 1..=messages",
+    "hold_window": 4,
+    "messages_per_trial": 500,
+    "note": "the strict count is close to a property of the harness: any adjacent swap produces a jump of two. This measures the misclassification mechanism, not real-feed reorder rates.",
+    "seed": 7,
+    "swap_probability_per_position": 0.1,
+    "trials": 300
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- seqproduct --seed 7 --trials 300 --out results/63-seqproduct.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:05:55Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "drops_detected_strict": 300,
+    "drops_detected_tolerant": 299,
+    "drops_outside_last_window_count": 299,
+    "drops_outside_last_window_missed_tolerant": 0,
+    "false_gap_count_strict": 300,
+    "false_gap_count_tolerant": 0
+  }
+}
