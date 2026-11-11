@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: chain breaks hidden from the spot U/u range rule on a derivatives-style feed with `pu`, plus false restarts on unknown-level removals.
+    Puchain {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a replace-on-snapshot recorder versus a sequence-guarded merge recorder when snapshots are reordered against updates.
     Snapshotcheck {
         #[arg(long, default_value_t = 7)]
@@ -1889,6 +1898,108 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- puchain: spot range rule vs pu==previous-u rule on a derivatives-style feed ----
+
+const PU_EVENTS: usize = 300;
+
+/// (U, u, pu, level, absolute quantity; 0 removes)
+type PuEvt = (u64, u64, u64, u64, u32);
+
+/// Overlapping-range stream: each event spans 1..=3 ids, starts up to 4 ids before pu+1, and pu is the previous event's u.
+fn pu_stream(rng: &mut SplitMix) -> Vec<PuEvt> {
+    let mut v = Vec::with_capacity(PU_EVENTS);
+    let mut prev_u = 1000u64;
+    for _ in 0..PU_EVENTS {
+        let ov = rng.below(5);
+        let first = prev_u + 1 - ov;
+        let last = prev_u + 1 + rng.below(3);
+        let q = if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) as u32 };
+        v.push((first, last, prev_u, rng.below(60), q));
+        prev_u = last;
+    }
+    v
+}
+
+/// Spot rule: first.U <= prev_u+1 <= first.u
+fn pu_range_ok(prev_u: u64, e: &PuEvt) -> bool { e.0 <= prev_u + 1 && prev_u + 1 <= e.1 }
+
+/// Returns (range rule missed the break, pu rule missed the break) after skipping one delivered event whose gap the range rule cannot see.
+fn pu_break_trial(rng: &mut SplitMix) -> (bool, bool) {
+    let s = pu_stream(rng);
+    // candidate positions: skipping s[i] leaves s[i+1] passing the range rule
+    let cands: Vec<usize> = (1..s.len() - 1).filter(|&i| pu_range_ok(s[i - 1].1, &s[i + 1])).collect();
+    if cands.is_empty() { return (false, false); }
+    let i = cands[rng.below(cands.len() as u64) as usize];
+    let (prev, next) = (&s[i - 1], &s[i + 1]);
+    (pu_range_ok(prev.1, next), next.2 == prev.1)
+}
+
+/// Clean control with a share of removals of unknown levels. Returns (range-rule alarms, pu-rule alarms, strict-unknown-removal restarts).
+fn pu_clean_trial(rng: &mut SplitMix) -> (u64, u64, u64) {
+    let s = pu_stream(rng);
+    let mut book: BTreeMap<u64, u32> = BTreeMap::new();
+    let (mut r, mut p, mut strict) = (0, 0, 0);
+    for (i, e) in s.iter().enumerate() {
+        if i > 0 {
+            if !pu_range_ok(s[i - 1].1, e) { r += 1; }
+            if e.2 != s[i - 1].1 { p += 1; }
+        }
+        if e.4 == 0 {
+            if book.remove(&e.3).is_none() { strict += 1; }
+        } else {
+            book.insert(e.3, e.4);
+        }
+    }
+    (r, p, strict)
+}
+
+fn puchain(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut range_missed, mut pu_missed) = (0u64, 0u64);
+    for _ in 0..trials {
+        let (a, b) = pu_break_trial(&mut rng);
+        if a { range_missed += 1; }
+        if b { pu_missed += 1; }
+    }
+    let (mut r_fp, mut p_fp, mut strict_fp, mut strict_trials) = (0u64, 0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (r, p, st) = pu_clean_trial(&mut rng);
+        r_fp += r;
+        p_fp += p;
+        strict_fp += st;
+        if st > 0 { strict_trials += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "puchain",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": PU_EVENTS,
+                    "note": "overlapping U/u ranges; the injected break skips one event chosen so the next event still passes the range rule; clean controls hold removals of levels not in the book" },
+        "summary": {
+            "pu_break_missed_by_range_rule_count": range_missed,
+            "pu_break_missed_by_pu_rule_count": pu_missed,
+            "clean_range_rule_alarm_count": r_fp,
+            "clean_pu_rule_alarm_count": p_fp,
+            "clean_strict_unknown_removal_restart_count": strict_fp,
+            "clean_trials_with_strict_unknown_removal_restart": strict_trials,
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- puchain --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" },
+                { "url": "https://developers.binance.com/docs/derivatives/options-trading/websocket-market-streams/How-to-manage-a-local-order-book-correctly", "license": "public documentation, read only for the rule text; no data used" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- snapshotcheck: replace-on-snapshot recorder vs sequence-guarded merge under snapshot/update reorder ----
 
 const SNAP_EVERY: u64 = 25;
@@ -2091,6 +2202,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
         Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
         Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
@@ -2331,6 +2443,22 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn puchain_is_deterministic_and_pointer_resolves() {
+        assert_eq!(pu_break_trial(&mut SplitMix(7)), pu_break_trial(&mut SplitMix(7)));
+        for seed in 0..50 {
+            let (r, p) = pu_break_trial(&mut SplitMix(seed));
+            assert!(r && !p);
+            assert_eq!(pu_clean_trial(&mut SplitMix(seed)).0, 0);
+            assert_eq!(pu_clean_trial(&mut SplitMix(seed)).1, 0);
+        }
+        let out = std::env::temp_dir().join(format!("bookrecord-pu-{}.json", std::process::id()));
+        puchain(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/pu_break_missed_by_range_rule_count").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

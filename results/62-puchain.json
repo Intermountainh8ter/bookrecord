@@ -1,0 +1,36 @@
+{
+  "experiment": "puchain",
+  "params": {
+    "events_per_trial": 300,
+    "note": "overlapping U/u ranges; the injected break skips one event chosen so the next event still passes the range rule; clean controls hold removals of levels not in the book",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- puchain --seed 7 --trials 200 --out results/62-puchain.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      },
+      {
+        "license": "public documentation, read only for the rule text; no data used",
+        "url": "https://developers.binance.com/docs/derivatives/options-trading/websocket-market-streams/How-to-manage-a-local-order-book-correctly"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T09:50:26Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "clean_pu_rule_alarm_count": 0,
+    "clean_range_rule_alarm_count": 0,
+    "clean_strict_unknown_removal_restart_count": 6065,
+    "clean_trials_with_strict_unknown_removal_restart": 200,
+    "pu_break_missed_by_pu_rule_count": 0,
+    "pu_break_missed_by_range_rule_count": 200
+  }
+}

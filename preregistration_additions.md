@@ -103,3 +103,11 @@ Hypothesis: over 200 seeded trials of 1500 messages with a drifting mid price an
 Metric: /summary/checksum_mismatch_count_no_truncate (trials with at least one mismatch). Expected: between 1 and 200, expected_range [1, 200]; truncating arm count 0.
 
 Falsifier: the non-truncating arm raises zero mismatches across all 200 trials, or the truncating arm raises any mismatch.
+
+## 2026-11-11T09:50:05Z puchain proposal:94118b901787a79c1c42a0af1d6d16fd900cf358689d8ef58f9510ce826c1816
+
+Hypothesis: on a seeded synthetic derivatives-style feed (200 trials, seed 7, one injected chain break per trial that skips an event while keeping the next event's U <= prev_u+1 <= u overlap), the spot range-overlap rule misses at least 150 of 200 breaks while the pu==previous u rule misses 0, and the pu rule raises 0 false restarts on clean controls holding benign unknown-level removals.
+
+Metric: /summary/pu_break_missed_by_range_rule_count. Expected: at least 150 of 200, expected_range [150, 200].
+
+Falsifier: the range rule misses fewer than 150 of 200 breaks, or the pu rule misses any break or raises any false restart on clean controls.
