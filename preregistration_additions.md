@@ -167,3 +167,11 @@ Hypothesis: on a seeded synthetic stream of 200 trials with two schema version s
 Metric: /pinned/silent_misdecodes. Expected: total at least 400 across 200 trials, expected_range [400, 1000000]; strict and version-aware totals equal 0.
 
 Falsifier: a pinned total below 400 across the 200 trials, or any silent mis-decode by the strict or version-aware recorder.
+
+## 2026-11-11T11:29:19Z cadencestep proposal:b2fe64db484d4a6319799ee1ba5a1fe4d08bee1579a393ee2e7290c535191504
+
+Hypothesis: for identical seeded synthetic frames (200 trials, 300 frames each, 20 to 80 messages per frame, per-message apply time uniform 100 to 600 microseconds), the count of frames over budget is strictly larger at the 20 ms budget than at the 25 ms budget, and the 25 ms count is strictly larger than the 50 ms count.
+
+Metric: /budgets/over_budget_frames_20ms. Expected: at least 10000 of 60000 frames and above the 25 ms count, expected_range [10000, 30000].
+
+Falsifier: the 20 ms count is not strictly greater than the 25 ms count, or is below 10000.

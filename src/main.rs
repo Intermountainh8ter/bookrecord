@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: frames whose total apply time exceeds apply budgets equal to the 50, 25 and 20 ms venue periods.
+    Cadencestep {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a silence-timeout stall detector calibrated on per-message cadence, run on per-message and 50 ms-batched delivery.
     Cadencecheck {
         #[arg(long, default_value_t = 7)]
@@ -2216,6 +2225,59 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- cadencestep: frames over an apply budget at 50, 25 and 20 ms venue periods ----
+
+const CST_FRAMES: u64 = 300;
+const CST_BUDGETS_US: [u64; 3] = [50_000, 25_000, 20_000];
+
+/// Total apply time (microseconds) of each frame: 20..=80 messages, each 100..=600 us.
+fn cadencestep_frames(rng: &mut SplitMix, frames: u64) -> Vec<u64> {
+    (0..frames)
+        .map(|_| {
+            let n = 20 + rng.below(61);
+            (0..n).map(|_| 100 + rng.below(501)).sum()
+        })
+        .collect()
+}
+
+fn cadencestep(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut over = [0u64; 3];
+    for _ in 0..trials {
+        for f in cadencestep_frames(&mut rng, CST_FRAMES) {
+            for (i, b) in CST_BUDGETS_US.iter().enumerate() {
+                if f > *b { over[i] += 1; }
+            }
+        }
+    }
+    let res = serde_json::json!({
+        "experiment": "cadencestep",
+        "params": { "seed": seed, "trials": trials, "frames_per_trial": CST_FRAMES, "total_frames": trials * CST_FRAMES,
+                    "budgets_us": CST_BUDGETS_US,
+                    "note": "the same frames are compared against each budget; messages per frame 20 to 80, apply time per message uniform 100 to 600 microseconds" },
+        "budgets": {
+            "over_budget_frames_50ms": over[0],
+            "over_budget_frames_25ms": over[1],
+            "over_budget_frames_20ms": over[2],
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- cadencestep --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "https://developers.binance.com/docs/binance-spot-api-docs/CHANGELOG", "license": "public documentation, cited only for the cadence values; no data downloaded" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["budgets"])?);
+    Ok(())
+}
+
 // ---- cadencecheck: silence-timeout stall detector under per-message and batched delivery ----
 
 const CAD_MESSAGES: usize = 1000;
@@ -2880,6 +2942,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Cadencestep { seed, trials, out } => cadencestep(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
         Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
         Cmd::Checksumresub { seed, trials, out } => checksumresub(seed, trials, &out),
@@ -3172,6 +3235,19 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn cadencestep_is_deterministic_and_budgets_are_monotone() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(cadencestep_frames(&mut a, 50), cadencestep_frames(&mut b, 50));
+        let out = std::env::temp_dir().join(format!("bookrecord-cst-{}.json", std::process::id()));
+        cadencestep(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        let g = |k: &str| v.pointer(k).unwrap().as_u64().unwrap();
+        assert!(g("/budgets/over_budget_frames_20ms") >= g("/budgets/over_budget_frames_25ms"));
+        assert!(g("/budgets/over_budget_frames_25ms") >= g("/budgets/over_budget_frames_50ms"));
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

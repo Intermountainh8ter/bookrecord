@@ -1,0 +1,35 @@
+{
+  "budgets": {
+    "over_budget_frames_20ms": 22752,
+    "over_budget_frames_25ms": 8660,
+    "over_budget_frames_50ms": 0
+  },
+  "experiment": "cadencestep",
+  "params": {
+    "budgets_us": [
+      50000,
+      25000,
+      20000
+    ],
+    "frames_per_trial": 300,
+    "note": "the same frames are compared against each budget; messages per frame 20 to 80, apply time per message uniform 100 to 600 microseconds",
+    "seed": 7,
+    "total_frames": 60000,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- cadencestep --seed 7 --trials 200 --out results/79-cadencestep.json",
+    "data_sources": [
+      {
+        "license": "public documentation, cited only for the cadence values; no data downloaded",
+        "url": "https://developers.binance.com/docs/binance-spot-api-docs/CHANGELOG"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T11:29:40Z",
+    "wall_s": 0.0
+  }
+}
