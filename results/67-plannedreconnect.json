@@ -1,0 +1,45 @@
+{
+  "experiment": "plannedreconnect",
+  "params": {
+    "events_per_trial": 400,
+    "handover_after_id": "uniform 100..=300",
+    "note": "missed updates under cold restart follow from the assumed resnapshot delay and the overlap result from the dedup rule; this measures the policy mechanism, not any venue's behaviour or notice lead time.",
+    "overlap_ids": "uniform 1..=5",
+    "resnapshot_delay_ids": "uniform 1..=5",
+    "seed": 7,
+    "trials": 200
+  },
+  "plannedreconnect": {
+    "cold_restart": {
+      "duplicate_applications": 0,
+      "missed_updates": 601,
+      "stale_book_events": 601
+    },
+    "cold_restart_trials_with_missed_update": 200,
+    "overlap_dedup": {
+      "duplicate_applications": 0,
+      "missed_updates": 0,
+      "stale_book_events": 0
+    },
+    "overlap_no_dedup": {
+      "duplicate_applications": 568,
+      "missed_updates": 0,
+      "stale_book_events": 0
+    }
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- plannedreconnect --seed 7 --trials 200 --out results/67-plannedreconnect.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:31:11Z",
+    "wall_s": 0.0
+  }
+}

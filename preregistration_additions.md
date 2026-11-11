@@ -135,3 +135,11 @@ Hypothesis: on 200 seeded clean streams of 300 multi-level messages (2 to 6 leve
 Metric: /arms/per_level/false_mismatch_count. Expected: at least 150, expected_range [150, 1000000]; per-message count equals 0.
 
 Falsifier: a per-level false mismatch count below 150, or any false mismatch for the per-message verifier on a clean stream, or a corruption missed by the per-message verifier in its own message.
+
+## 2026-11-11T10:30:49Z plannedreconnect proposal:916558ade7f0849b13f74c9d805f6243f19b3165c0d876b30082ceb633a5c608
+
+Hypothesis: on a seeded synthetic stream with a planned connection handover (200 trials, seed 7), a cold-restart recorder (drop, resnapshot) misses at least one update in every trial, while an overlap recorder (second connection opened before the first closes, deduplicated by update id) misses none and applies none twice.
+
+Metric: /plannedreconnect/cold_restart/missed_updates. Expected: total at least 200 over 200 trials, expected_range [200, 1000000]; overlap missed_updates and duplicate_applications both equal 0.
+
+Falsifier: overlap missed_updates or duplicate_applications above 0, or cold-restart total missed_updates below 200 across 200 trials.

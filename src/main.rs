@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: planned connection handover with a cold-restart recorder vs an overlap recorder deduplicated by update id.
+    Plannedreconnect {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: strict jump-greater-than-one gap rule vs a reorder-tolerant hold-window rule on adjacent-swap reordered streams, with and without one drop.
     Seqproduct {
         #[arg(long, default_value_t = 7)]
@@ -2220,6 +2229,84 @@ fn seqproduct(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- plannedreconnect: cold restart vs overlapping replacement connection at a planned handover ----
+
+const PRC_EVENTS: u64 = 400;
+
+/// Per-policy counts for one trial: (missed updates, duplicate applications, stale-book events).
+type PrcCounts = (u64, u64, u64);
+
+/// Cold restart: the old connection ends after id `h`; the resnapshot lands `g` ids later, so ids h+1..=h+g never reach the tape and the book is stale meanwhile.
+fn prc_cold(h: u64, g: u64) -> PrcCounts {
+    let mut tape = std::collections::BTreeSet::new();
+    for id in 1..=h { tape.insert(id); }
+    for id in (h + g + 1)..=PRC_EVENTS { tape.insert(id); }
+    (PRC_EVENTS - tape.len() as u64, 0, g)
+}
+
+/// Overlap: the new connection delivers ids from `h+1-o` while the old one delivers up to `h`; `dedup` applies an id only once.
+fn prc_overlap(h: u64, o: u64, dedup: bool) -> PrcCounts {
+    let mut applied: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut apply = |id: u64| {
+        let c = applied.entry(id).or_insert(0);
+        if !dedup || *c == 0 { *c += 1; }
+    };
+    for id in 1..=h { apply(id); }
+    for id in (h + 1 - o)..=PRC_EVENTS { apply(id); }
+    let missed = (1..=PRC_EVENTS).filter(|i| !applied.contains_key(i)).count() as u64;
+    let dups = applied.values().map(|c| c.saturating_sub(1)).sum();
+    (missed, dups, 0)
+}
+
+/// One trial: handover after id h in 100..=300, resnapshot delay 1..=5 ids, overlap 1..=5 ids.
+fn prc_trial(rng: &mut SplitMix) -> (PrcCounts, PrcCounts, PrcCounts) {
+    let h = 100 + rng.below(201);
+    let g = 1 + rng.below(5);
+    let o = 1 + rng.below(5);
+    (prc_cold(h, g), prc_overlap(h, o, true), prc_overlap(h, o, false))
+}
+
+fn plannedreconnect(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut tot = [[0u64; 3]; 3];
+    let mut cold_trials_missing = 0u64;
+    for _ in 0..trials {
+        let r = prc_trial(&mut rng);
+        if r.0 .0 > 0 { cold_trials_missing += 1; }
+        for (i, c) in [r.0, r.1, r.2].iter().enumerate() {
+            tot[i][0] += c.0; tot[i][1] += c.1; tot[i][2] += c.2;
+        }
+    }
+    let arm = |t: [u64; 3]| serde_json::json!({ "missed_updates": t[0], "duplicate_applications": t[1], "stale_book_events": t[2] });
+    let res = serde_json::json!({
+        "experiment": "plannedreconnect",
+        "params": { "seed": seed, "trials": trials, "events_per_trial": PRC_EVENTS, "handover_after_id": "uniform 100..=300",
+                    "resnapshot_delay_ids": "uniform 1..=5", "overlap_ids": "uniform 1..=5",
+                    "note": "missed updates under cold restart follow from the assumed resnapshot delay and the overlap result from the dedup rule; this measures the policy mechanism, not any venue's behaviour or notice lead time." },
+        "plannedreconnect": {
+            "cold_restart": arm(tot[0]),
+            "overlap_dedup": arm(tot[1]),
+            "overlap_no_dedup": arm(tot[2]),
+            "cold_restart_trials_with_missed_update": cold_trials_missing
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- plannedreconnect --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["plannedreconnect"])?);
+    Ok(())
+}
+
 // ---- puchain: spot range rule vs pu==previous-u rule on a derivatives-style feed ----
 
 const PU_EVENTS: usize = 300;
@@ -2525,6 +2612,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
+        Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
@@ -2813,6 +2901,19 @@ mod tests {
         seqproduct(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/false_gap_count_strict").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn plannedreconnect_is_deterministic_and_pointer_resolves() {
+        assert_eq!(prc_trial(&mut SplitMix(7)), prc_trial(&mut SplitMix(7)));
+        assert_eq!(prc_cold(100, 3), (3, 0, 3));
+        assert_eq!(prc_overlap(100, 2, true), (0, 0, 0));
+        assert_eq!(prc_overlap(100, 2, false), (0, 2, 0));
+        let out = std::env::temp_dir().join(format!("bookrecord-prc-{}.json", std::process::id()));
+        plannedreconnect(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/plannedreconnect/cold_restart/missed_updates").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
