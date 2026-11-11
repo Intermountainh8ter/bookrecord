@@ -1,0 +1,35 @@
+{
+  "experiment": "schemaretire",
+  "params": {
+    "frames_per_trial": 400,
+    "layouts": "v0 [price, qty, ts]; v1 [qty, price, ts]; v2 [ts, price, qty]",
+    "seed": 7,
+    "trials": 200,
+    "version_steps_per_trial": 2
+  },
+  "pinned": {
+    "silent_misdecodes": 60403
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- schemaretire --seed 7 --trials 200 --out results/73-schemaretire.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:59:27Z",
+    "wall_s": 0.0
+  },
+  "strict": {
+    "frames_rejected_loudly": 60403,
+    "silent_misdecodes": 0
+  },
+  "version_aware": {
+    "silent_misdecodes": 0
+  }
+}

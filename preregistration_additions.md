@@ -159,3 +159,11 @@ Hypothesis: on a seeded synthetic stream whose update period steps from 50 ms to
 Metric: /summary/miss_rate_fixed. Expected: at least 0.30, expected_range [0.30, 1.0]; adaptive miss rate below 0.05.
 
 Falsifier: a fixed-threshold miss rate below 0.30, or an adaptive-detector miss rate of 0.05 or more, across the 300 trials at seed 7.
+
+## 2026-11-11T10:59:10Z schemaretire proposal:174a443ffc8fcf1efd5e1886f623fe03e39ee4559b9ebf061e2bd4e0a5c9a792
+
+Hypothesis: on a seeded synthetic stream of 200 trials with two schema version steps at random events, a recorder that pins the first version and decodes by field position mis-decodes at least one frame silently after each step in every trial, while a strict-version recorder and a version-aware recorder record 0 silent mis-decodes at both steps.
+
+Metric: /pinned/silent_misdecodes. Expected: total at least 400 across 200 trials, expected_range [400, 1000000]; strict and version-aware totals equal 0.
+
+Falsifier: a pinned total below 400 across the 200 trials, or any silent mis-decode by the strict or version-aware recorder.

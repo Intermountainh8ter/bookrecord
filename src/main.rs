@@ -132,6 +132,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: two schema version steps; version-pinned vs strict-version vs version-aware decoding.
+    Schemaretire {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: planned connection handover with a cold-restart recorder vs an overlap recorder deduplicated by update id.
     Plannedreconnect {
         #[arg(long, default_value_t = 7)]
@@ -1340,6 +1349,72 @@ fn cadencedrift(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
     std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
     println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
+// ---- schemaretire: silent mis-decodes at two schema version steps ----
+
+const SCHEMA_FRAMES: usize = 400;
+/// Field order on the wire per schema version (0 = price, 1 = quantity, 2 = timestamp).
+const SCHEMA_LAYOUTS: [[usize; 3]; 3] = [[0, 1, 2], [1, 0, 2], [2, 0, 1]];
+
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct SchemaTrial { pinned_silent: u64, strict_silent: u64, aware_silent: u64, strict_rejected: u64, steps: u64 }
+
+/// One trial: 400 frames; the version steps 0 -> 1 at one random frame and 1 -> 2 at a later one. A frame carries its version
+/// and three u64 fields laid out per version. Pinned decodes every frame with the version-0 layout and never errors; strict
+/// rejects any frame whose version is not 0 (loud, counted separately); aware decodes by the frame's own version.
+fn schema_trial(rng: &mut SplitMix) -> SchemaTrial {
+    let mut r = SchemaTrial::default();
+    let s1 = 20 + rng.below(160) as usize;
+    let s2 = s1 + 20 + rng.below(160) as usize;
+    r.steps = 2;
+    for i in 0..SCHEMA_FRAMES {
+        let ver = if i >= s2 { 2 } else if i >= s1 { 1 } else { 0 };
+        let truth = [1_000 + rng.below(1_000_000), 1 + rng.below(1_000), 1_700_000_000_000 + i as u64 * 50 + rng.below(40)];
+        let mut wire = [0u64; 3];
+        for (pos, &field) in SCHEMA_LAYOUTS[ver].iter().enumerate() { wire[pos] = truth[field]; }
+        let decode = |layout: &[usize; 3]| { let mut d = [0u64; 3]; for (pos, &field) in layout.iter().enumerate() { d[field] = wire[pos]; } d };
+        if decode(&SCHEMA_LAYOUTS[0]) != truth { r.pinned_silent += 1; }
+        if ver != 0 { r.strict_rejected += 1; } else if decode(&SCHEMA_LAYOUTS[0]) != truth { r.strict_silent += 1; }
+        if decode(&SCHEMA_LAYOUTS[ver]) != truth { r.aware_silent += 1; }
+    }
+    r
+}
+
+fn schemaretire(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut t = SchemaTrial::default();
+    for _ in 0..trials {
+        let r = schema_trial(&mut rng);
+        t.pinned_silent += r.pinned_silent;
+        t.strict_silent += r.strict_silent;
+        t.aware_silent += r.aware_silent;
+        t.strict_rejected += r.strict_rejected;
+        t.steps += r.steps;
+    }
+    let res = serde_json::json!({
+        "experiment": "schemaretire",
+        "params": { "seed": seed, "trials": trials, "frames_per_trial": SCHEMA_FRAMES, "version_steps_per_trial": 2,
+                    "layouts": "v0 [price, qty, ts]; v1 [qty, price, ts]; v2 [ts, price, qty]" },
+        "pinned": { "silent_misdecodes": t.pinned_silent },
+        "strict": { "silent_misdecodes": t.strict_silent, "frames_rejected_loudly": t.strict_rejected },
+        "version_aware": { "silent_misdecodes": t.aware_silent },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- schemaretire --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["pinned"])?);
     Ok(())
 }
 
@@ -2809,6 +2884,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
         Cmd::Checksumresub { seed, trials, out } => checksumresub(seed, trials, &out),
         Cmd::Cadencedrift { seed, trials, out } => cadencedrift(seed, trials, &out),
+        Cmd::Schemaretire { seed, trials, out } => schemaretire(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
@@ -3011,6 +3087,21 @@ mod tests {
         cadencedrift(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/miss_rate_fixed").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn schemaretire_is_deterministic_and_pointer_resolves() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        let (x, y) = (schema_trial(&mut a), schema_trial(&mut b));
+        assert_eq!(x, y);
+        assert!(x.pinned_silent > 0);
+        assert_eq!((x.strict_silent, x.aware_silent), (0, 0));
+        let out = std::env::temp_dir().join(format!("bookrecord-schema-{}.json", std::process::id()));
+        schemaretire(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/pinned/silent_misdecodes").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
