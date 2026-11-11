@@ -143,3 +143,11 @@ Hypothesis: on a seeded synthetic stream with a planned connection handover (200
 Metric: /plannedreconnect/cold_restart/missed_updates. Expected: total at least 200 over 200 trials, expected_range [200, 1000000]; overlap missed_updates and duplicate_applications both equal 0.
 
 Falsifier: overlap missed_updates or duplicate_applications above 0, or cold-restart total missed_updates below 200 across 200 trials.
+
+## 2026-11-11T10:35:30Z checksumresub proposal:2fc49204864ef2b1d8317436d0087f179129400c85ba9695dea852c5d0fdcab8
+
+Hypothesis: under a heartbeat-deadline-only policy a silent single-level corruption is never detected within a stream that keeps delivering heartbeats, so undetected wrong updates are at least 1 in every injected trial, while the checksum-and-resubscribe policy leaves wrong updates only until the next message whose checksum covers the corrupted level.
+
+Metric: /policies/heartbeat_only/undetected_wrong_updates. Expected: at least 1, expected_range [1, 1000000000].
+
+Falsifier: heartbeat_only undetected_wrong_updates equal to 0 in the results file, or the checksum policy detecting zero corruptions.

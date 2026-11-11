@@ -1,0 +1,37 @@
+{
+  "experiment": "checksumresub",
+  "params": {
+    "checksum_depth": 10,
+    "messages_per_trial": 300,
+    "note": "one silent corruption (quantity + 1) per trial on a dense 10-level book, heartbeats never stop; for the checksum policy undetected_wrong_updates counts the one wrong update before the mismatch is seen and resubscribe repairs the book; for heartbeat_only it counts every message after which the local book differs from truth. A heartbeat-only recorder never resubscribes here by construction; this measures the policy mechanism, not any venue's behaviour.",
+    "seed": 7,
+    "trials": 200
+  },
+  "policies": {
+    "checksum_resubscribe": {
+      "corruptions_detected": 200,
+      "trials_wrong_at_stream_end": 0,
+      "undetected_wrong_updates": 200
+    },
+    "heartbeat_only": {
+      "corruptions_detected": 0,
+      "trials_wrong_at_stream_end": 13,
+      "undetected_wrong_updates": 3528
+    }
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- checksumresub --seed 7 --trials 200 --out results/68-checksumresub.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:35:52Z",
+    "wall_s": 2.0
+  }
+}

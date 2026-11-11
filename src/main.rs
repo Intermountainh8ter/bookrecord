@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: top-10 checksum verify-and-resubscribe vs heartbeat-deadline-only reconnect on a silent single-level corruption.
+    Checksumresub {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: planned connection handover with a cold-restart recorder vs an overlap recorder deduplicated by update id.
     Plannedreconnect {
         #[arg(long, default_value_t = 7)]
@@ -2307,6 +2316,95 @@ fn plannedreconnect(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()>
     Ok(())
 }
 
+// ---- checksumresub: top-10 checksum verify-and-resubscribe vs heartbeat-deadline-only reconnect ----
+
+const CRS_MSGS: u64 = 300;
+const CRS_DEPTH: i64 = 10;
+
+/// Per-policy counts for one trial: (wrong updates = messages after which the local book differs from truth, detected, wrong at stream end).
+type CrsCounts = (u64, bool, bool);
+
+/// One trial with a silent single-level corruption (quantity + 1) on one update; heartbeats keep arriving throughout.
+/// Checksum policy: top-10 CRC32 compared after every message; on mismatch the local book is replaced by a fresh snapshot (resubscribe).
+/// Heartbeat-only policy: reconnects only when heartbeats stop, which never happens here, so the book is never replaced.
+fn crs_trial(rng: &mut SplitMix) -> (CrsCounts, CrsCounts) {
+    let mid = STALE_MID as i64;
+    let (mut fb, mut fa): (Side, Side) = (Side::new(), Side::new());
+    for off in 0..CRS_DEPTH {
+        fb.insert(mid - 1 - off, 1 + rng.below(9) as u32);
+        fa.insert(mid + 1 + off, 1 + rng.below(9) as u32);
+    }
+    let to_s = |s: &Side| -> Vec<(String, String)> { s.iter().map(|(p, q)| msc_str(*p, *q)).collect() };
+    let (mut ck, mut hb) = (Book::default(), Book::default());
+    ck.load(&to_s(&fb), &to_s(&fa)).unwrap();
+    hb.load(&to_s(&fb), &to_s(&fa)).unwrap();
+    let bad_msg = rng.below(CRS_MSGS);
+    let (mut wrong_ck, mut wrong_hb, mut det_ck) = (0u64, 0u64, false);
+    for n in 0..CRS_MSGS {
+        let bid = rng.below(2) == 0;
+        let off = rng.below(CRS_DEPTH as u64) as i64;
+        let price = if bid { mid - 1 - off } else { mid + 1 + off };
+        let cur = if bid { fb[&price] } else { fa[&price] };
+        let mut q = 1 + rng.below(9) as u32;
+        if q == cur { q = q % 9 + 1; }
+        if bid { fb.insert(price, q); } else { fa.insert(price, q); }
+        let mut truth = Book::default();
+        truth.load(&to_s(&fb), &to_s(&fa)).unwrap();
+        let want = kraken_checksum(&truth, 1, 8);
+        let qa = if n == bad_msg { q + 1 } else { q };
+        let m = vec![msc_str(price, qa)];
+        let (b, a) = if bid { (m, Vec::new()) } else { (Vec::new(), m) };
+        ck.apply(&b, &a).unwrap();
+        hb.apply(&b, &a).unwrap();
+        if kraken_checksum(&ck, 1, 8) != want {
+            det_ck = true;
+            // the message just applied was wrong; resubscribe replaces the book
+            wrong_ck += 1;
+            ck.load(&to_s(&fb), &to_s(&fa)).unwrap();
+        }
+        if kraken_checksum(&hb, 1, 8) != want { wrong_hb += 1; }
+    }
+    let mut truth = Book::default();
+    truth.load(&to_s(&fb), &to_s(&fa)).unwrap();
+    let want = kraken_checksum(&truth, 1, 8);
+    ((wrong_ck, det_ck, kraken_checksum(&ck, 1, 8) != want), (wrong_hb, false, kraken_checksum(&hb, 1, 8) != want))
+}
+
+fn checksumresub(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut w, mut d, mut e) = ([0u64; 2], [0u64; 2], [0u64; 2]);
+    for _ in 0..trials {
+        let (c, h) = crs_trial(&mut rng);
+        for (i, x) in [c, h].iter().enumerate() {
+            w[i] += x.0;
+            if x.1 { d[i] += 1; }
+            if x.2 { e[i] += 1; }
+        }
+    }
+    let arm = |i: usize| serde_json::json!({ "undetected_wrong_updates": w[i], "corruptions_detected": d[i], "trials_wrong_at_stream_end": e[i] });
+    let res = serde_json::json!({
+        "experiment": "checksumresub",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": CRS_MSGS, "checksum_depth": CRS_DEPTH,
+                    "note": "one silent corruption (quantity + 1) per trial on a dense 10-level book, heartbeats never stop; for the checksum policy undetected_wrong_updates counts the one wrong update before the mismatch is seen and resubscribe repairs the book; for heartbeat_only it counts every message after which the local book differs from truth. A heartbeat-only recorder never resubscribes here by construction; this measures the policy mechanism, not any venue's behaviour." },
+        "policies": { "checksum_resubscribe": arm(0), "heartbeat_only": arm(1) },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- checksumresub --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["policies"])?);
+    Ok(())
+}
+
 // ---- puchain: spot range rule vs pu==previous-u rule on a derivatives-style feed ----
 
 const PU_EVENTS: usize = 300;
@@ -2613,6 +2711,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
         Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
+        Cmd::Checksumresub { seed, trials, out } => checksumresub(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
@@ -2914,6 +3013,19 @@ mod tests {
         plannedreconnect(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/plannedreconnect/cold_restart/missed_updates").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn checksumresub_is_deterministic_and_pointer_resolves() {
+        assert_eq!(crs_trial(&mut SplitMix(7)), crs_trial(&mut SplitMix(7)));
+        let (c, h) = crs_trial(&mut SplitMix(7));
+        assert!(c.1 && c.0 == 1 && !c.2);
+        assert!(h.0 >= 1 && !h.1);
+        let out = std::env::temp_dir().join(format!("bookrecord-crs-{}.json", std::process::id()));
+        checksumresub(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/policies/heartbeat_only/undetected_wrong_updates").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
