@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: sequence discontinuities from a bounded receive queue at stepped message-rate bands, clustered versus evenly spaced arrivals.
+    Burstgap {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: frames whose total apply time exceeds apply budgets equal to the 50, 25 and 20 ms venue periods.
     Cadencestep {
         #[arg(long, default_value_t = 7)]
@@ -2225,6 +2234,89 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- burstgap: sequence discontinuities from a bounded receive queue per message-rate band ----
+
+const BG_RATES: [u64; 4] = [500, 1500, 3000, 4900];
+const BG_SERVICE_US: u64 = 200;
+const BG_CAPACITY: usize = 32;
+const BG_BURST: u64 = 20;
+const BG_BURST_SPACING_US: u64 = 20;
+
+/// Arrival times (us) over one second: either evenly spaced, or bursts of BG_BURST frames in
+/// the middle half of non-overlapping slots at a random offset, so both have the same mean rate.
+fn burstgap_arrivals(rng: &mut SplitMix, rate: u64, clustered: bool) -> Vec<u64> {
+    if !clustered {
+        return (0..rate).map(|i| i * 1_000_000 / rate).collect();
+    }
+    let bursts = rate / BG_BURST;
+    let slot = 1_000_000 / bursts;
+    let span = BG_BURST * BG_BURST_SPACING_US;
+    let mut v = Vec::with_capacity(rate as usize);
+    for k in 0..bursts {
+        let start = k * slot + slot / 4 + rng.below(slot / 2 - span);
+        for j in 0..BG_BURST { v.push(start + j * BG_BURST_SPACING_US); }
+    }
+    v
+}
+
+/// Drop-newest bounded queue with fixed service time; returns (frames dropped, discontinuities),
+/// a discontinuity being a maximal run of consecutive dropped sequence numbers.
+fn burstgap_queue(arrivals: &[u64]) -> (u64, u64) {
+    let mut done: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    let (mut last_done, mut dropped, mut gaps, mut prev_dropped) = (0u64, 0u64, 0u64, false);
+    for &t in arrivals {
+        while done.front().is_some_and(|&d| d <= t) { done.pop_front(); }
+        if done.len() >= BG_CAPACITY {
+            dropped += 1;
+            if !prev_dropped { gaps += 1; }
+            prev_dropped = true;
+        } else {
+            last_done = last_done.max(t) + BG_SERVICE_US;
+            done.push_back(last_done);
+            prev_dropped = false;
+        }
+    }
+    (dropped, gaps)
+}
+
+fn burstgap(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut bands = Vec::new();
+    for &rate in BG_RATES.iter() {
+        let (mut cg, mut cd, mut eg, mut ed) = (0u64, 0u64, 0u64, 0u64);
+        for _ in 0..trials {
+            let (d, g) = burstgap_queue(&burstgap_arrivals(&mut rng, rate, true));
+            cd += d; cg += g;
+            let (d, g) = burstgap_queue(&burstgap_arrivals(&mut rng, rate, false));
+            ed += d; eg += g;
+        }
+        bands.push(serde_json::json!({
+            "rate_msgs_per_s": rate, "gap_count": cg, "dropped_frames": cd,
+            "even_gap_count": eg, "even_dropped_frames": ed,
+        }));
+    }
+    let res = serde_json::json!({
+        "experiment": "burstgap",
+        "params": { "seed": seed, "trials": trials, "seconds_per_trial": 1, "queue_capacity": BG_CAPACITY,
+                    "service_us": BG_SERVICE_US, "burst_frames": BG_BURST, "burst_spacing_us": BG_BURST_SPACING_US,
+                    "note": "bounded queue drops the newest frame when full; gap_count counts runs of consecutive dropped sequence numbers under clustered arrivals; even_* uses evenly spaced arrivals at the same mean rate" },
+        "bands": bands,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- burstgap --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [ { "url": "synthetic, seeded generator in the repo", "license": "MIT" } ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["bands"])?);
+    Ok(())
+}
+
 // ---- cadencestep: frames over an apply budget at 50, 25 and 20 ms venue periods ----
 
 const CST_FRAMES: u64 = 300;
@@ -2942,6 +3034,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Burstgap { seed, trials, out } => burstgap(seed, trials, &out),
         Cmd::Cadencestep { seed, trials, out } => cadencestep(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
         Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
@@ -3235,6 +3328,20 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn burstgap_is_deterministic_and_counts_runs() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(burstgap_arrivals(&mut a, 1500, true), burstgap_arrivals(&mut b, 1500, true));
+        assert_eq!(burstgap_queue(&[0, 1, 2]), (0, 0));
+        let burst: Vec<u64> = vec![0; 40];
+        assert_eq!(burstgap_queue(&burst), (8, 1));
+        let out = std::env::temp_dir().join(format!("bookrecord-bg-{}.json", std::process::id()));
+        burstgap(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/bands/0/gap_count").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

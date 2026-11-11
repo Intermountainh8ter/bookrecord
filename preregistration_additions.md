@@ -175,3 +175,11 @@ Hypothesis: for identical seeded synthetic frames (200 trials, 300 frames each, 
 Metric: /budgets/over_budget_frames_20ms. Expected: at least 10000 of 60000 frames and above the 25 ms count, expected_range [10000, 30000].
 
 Falsifier: the 20 ms count is not strictly greater than the 25 ms count, or is below 10000.
+
+## 2026-11-11T12:04:02Z burstgap proposal:336e15a3e22459a2dede458e92f066679d10d88aebc524c55409b117dccf5d7c
+
+Hypothesis: with a fixed-capacity receive queue that drops the newest frame when full and a fixed per-frame apply budget, the count of sequence discontinuities is zero in the lowest message-rate band and strictly higher in the highest band, and clustered bursts produce more discontinuities than evenly spaced arrivals at the same mean rate.
+
+Metric: /bands/0/gap_count. Expected: equal to 0 in band 0 and the top band count exceeds band 0, expected_range [0, 0].
+
+Falsifier: a nonzero gap count in the lowest band, or a top-band gap count not above the lowest band, or evenly spaced arrivals producing at least as many gaps as clustered bursts.

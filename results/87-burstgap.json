@@ -1,0 +1,58 @@
+{
+  "bands": [
+    {
+      "dropped_frames": 0,
+      "even_dropped_frames": 0,
+      "even_gap_count": 0,
+      "gap_count": 0,
+      "rate_msgs_per_s": 500
+    },
+    {
+      "dropped_frames": 0,
+      "even_dropped_frames": 0,
+      "even_gap_count": 0,
+      "gap_count": 0,
+      "rate_msgs_per_s": 1500
+    },
+    {
+      "dropped_frames": 0,
+      "even_dropped_frames": 0,
+      "even_gap_count": 0,
+      "gap_count": 0,
+      "rate_msgs_per_s": 3000
+    },
+    {
+      "dropped_frames": 0,
+      "even_dropped_frames": 0,
+      "even_gap_count": 0,
+      "gap_count": 0,
+      "rate_msgs_per_s": 4900
+    }
+  ],
+  "experiment": "burstgap",
+  "params": {
+    "burst_frames": 20,
+    "burst_spacing_us": 20,
+    "note": "bounded queue drops the newest frame when full; gap_count counts runs of consecutive dropped sequence numbers under clustered arrivals; even_* uses evenly spaced arrivals at the same mean rate",
+    "queue_capacity": 32,
+    "seconds_per_trial": 1,
+    "seed": 7,
+    "service_us": 200,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- burstgap --seed 7 --trials 200 --out results/87-burstgap.json",
+    "data_sources": [
+      {
+        "license": "MIT",
+        "url": "synthetic, seeded generator in the repo"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T12:05:55Z",
+    "wall_s": 0.0
+  }
+}
