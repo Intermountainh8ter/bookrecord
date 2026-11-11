@@ -123,6 +123,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: stall detector with a fixed threshold vs a rolling-median adaptive threshold when the update period steps 50 to 25 to 20 ms.
+    Cadencedrift {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 300)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: planned connection handover with a cold-restart recorder vs an overlap recorder deduplicated by update id.
     Plannedreconnect {
         #[arg(long, default_value_t = 7)]
@@ -1244,6 +1253,93 @@ fn latencycheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
     std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
     println!("{}", serde_json::to_string_pretty(&res["detection"])?);
+    Ok(())
+}
+
+// ---- cadencedrift: fixed-threshold vs rolling-median stall detector across a stepped update period ----
+
+const DRIFT_PERIODS_US: [u64; 3] = [50_000, 25_000, 20_000];
+const DRIFT_MSGS_PER_PHASE: usize = 300;
+const DRIFT_FIXED_THRESHOLD_US: u64 = 150_000;
+const DRIFT_WINDOW: usize = 32;
+
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct DriftTrial { stalls: u64, fixed_missed: u64, adaptive_missed: u64, fixed_false: u64, adaptive_false: u64 }
+
+/// One trial: three phases of 300 messages with +-20% jitter; one stall (a silence of four periods) is injected per phase at a
+/// message index 60-259 of that phase. The adaptive threshold is three times the median of the last 32 intervals.
+fn drift_trial(rng: &mut SplitMix) -> DriftTrial {
+    let mut r = DriftTrial::default();
+    let mut recent: Vec<u64> = Vec::new();
+    for &period in DRIFT_PERIODS_US.iter() {
+        let stall_at = 60 + rng.below(200) as usize;
+        for i in 0..DRIFT_MSGS_PER_PHASE {
+            let jitter = period / 5;
+            let mut gap = period - jitter + rng.below(2 * jitter + 1);
+            let stalled = i == stall_at;
+            if stalled { gap = 4 * period; r.stalls += 1; }
+            let adaptive_thr = if recent.len() >= DRIFT_WINDOW {
+                let mut v = recent.clone();
+                v.sort_unstable();
+                Some(3 * v[v.len() / 2])
+            } else { None };
+            let fixed_hit = gap > DRIFT_FIXED_THRESHOLD_US;
+            let adaptive_hit = adaptive_thr.map_or(false, |t| gap > t);
+            if stalled {
+                if !fixed_hit { r.fixed_missed += 1; }
+                if !adaptive_hit { r.adaptive_missed += 1; }
+            } else {
+                if fixed_hit { r.fixed_false += 1; }
+                if adaptive_hit { r.adaptive_false += 1; }
+            }
+            recent.push(gap);
+            if recent.len() > DRIFT_WINDOW { recent.remove(0); }
+        }
+    }
+    r
+}
+
+fn cadencedrift(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let mut t = DriftTrial::default();
+    for _ in 0..trials {
+        let r = drift_trial(&mut rng);
+        t.stalls += r.stalls;
+        t.fixed_missed += r.fixed_missed;
+        t.adaptive_missed += r.adaptive_missed;
+        t.fixed_false += r.fixed_false;
+        t.adaptive_false += r.adaptive_false;
+    }
+    let rate = |n: u64| if t.stalls == 0 { 0.0 } else { n as f64 / t.stalls as f64 };
+    let res = serde_json::json!({
+        "experiment": "cadencedrift",
+        "params": { "seed": seed, "trials": trials, "periods_us": DRIFT_PERIODS_US, "messages_per_phase": DRIFT_MSGS_PER_PHASE,
+                    "jitter": "uniform +-20% of the period", "stall": "one silence of four periods per phase, at message 60-259 of the phase",
+                    "fixed_threshold_us": DRIFT_FIXED_THRESHOLD_US, "adaptive": "3 x median of the last 32 intervals" },
+        "summary": {
+            "injected_stalls": t.stalls,
+            "miss_rate_fixed": rate(t.fixed_missed),
+            "miss_rate_adaptive": rate(t.adaptive_missed),
+            "missed_fixed": t.fixed_missed,
+            "missed_adaptive": t.adaptive_missed,
+            "false_alarms_fixed": t.fixed_false,
+            "false_alarms_adaptive": t.adaptive_false
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- cadencedrift --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
     Ok(())
 }
 
@@ -2712,6 +2808,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
         Cmd::Plannedreconnect { seed, trials, out } => plannedreconnect(seed, trials, &out),
         Cmd::Checksumresub { seed, trials, out } => checksumresub(seed, trials, &out),
+        Cmd::Cadencedrift { seed, trials, out } => cadencedrift(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
         Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
@@ -2899,6 +2996,21 @@ mod tests {
         latencycheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/detection/updates_to_catch_p95_by_cadence/500").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn cadencedrift_is_deterministic_and_pointer_resolves() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        let (x, y) = (drift_trial(&mut a), drift_trial(&mut b));
+        assert_eq!(x, y);
+        assert_eq!(x.stalls, 3);
+        assert_eq!(x.fixed_missed, 2);
+        let out = std::env::temp_dir().join(format!("bookrecord-drift-{}.json", std::process::id()));
+        cadencedrift(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/miss_rate_fixed").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

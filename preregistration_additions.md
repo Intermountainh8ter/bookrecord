@@ -151,3 +151,11 @@ Hypothesis: under a heartbeat-deadline-only policy a silent single-level corrupt
 Metric: /policies/heartbeat_only/undetected_wrong_updates. Expected: at least 1, expected_range [1, 1000000000].
 
 Falsifier: heartbeat_only undetected_wrong_updates equal to 0 in the results file, or the checksum policy detecting zero corruptions.
+
+## 2026-11-11T10:45:43Z cadencedrift proposal:8278e4ee25a6e41e7e5a5d12776b8d2e9142fcd64c7197586e80db5f29f43ac0
+
+Hypothesis: on a seeded synthetic stream whose update period steps from 50 ms to 25 ms to 20 ms with jitter, a stall detector with a threshold fixed at three times the 50 ms period misses injected stalls at the faster cadences (miss rate at least 0.30 across trials), while a rolling-median adaptive detector misses under 0.05 of injected stalls.
+
+Metric: /summary/miss_rate_fixed. Expected: at least 0.30, expected_range [0.30, 1.0]; adaptive miss rate below 0.05.
+
+Falsifier: a fixed-threshold miss rate below 0.30, or an adaptive-detector miss rate of 0.05 or more, across the 300 trials at seed 7.

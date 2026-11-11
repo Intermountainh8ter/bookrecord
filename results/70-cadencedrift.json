@@ -1,0 +1,41 @@
+{
+  "experiment": "cadencedrift",
+  "params": {
+    "adaptive": "3 x median of the last 32 intervals",
+    "fixed_threshold_us": 150000,
+    "jitter": "uniform +-20% of the period",
+    "messages_per_phase": 300,
+    "periods_us": [
+      50000,
+      25000,
+      20000
+    ],
+    "seed": 7,
+    "stall": "one silence of four periods per phase, at message 60-259 of the phase",
+    "trials": 300
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- cadencedrift --seed 7 --trials 300 --out results/70-cadencedrift.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:45:53Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "false_alarms_adaptive": 0,
+    "false_alarms_fixed": 0,
+    "injected_stalls": 900,
+    "miss_rate_adaptive": 0.0,
+    "miss_rate_fixed": 0.6666666666666666,
+    "missed_adaptive": 0,
+    "missed_fixed": 600
+  }
+}
