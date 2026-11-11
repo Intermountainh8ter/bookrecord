@@ -1,0 +1,42 @@
+{
+  "arms": {
+    "per_level": {
+      "false_mismatch_count": 179495
+    },
+    "per_message": {
+      "corruption_trials": 200,
+      "corruptions_caught_in_own_message": 200,
+      "false_mismatch_count": 0
+    }
+  },
+  "experiment": "msgchecksum",
+  "params": {
+    "checksum_depth": 10,
+    "messages_per_trial": 300,
+    "note": "the wire checksum covers the book after the whole message; the per-level verifier compares after every level update, the per-message verifier once after the last; corruption adds 1 to the quantity of a message's last update",
+    "seed": 7,
+    "trials": 200,
+    "updates_per_message": [
+      2,
+      6
+    ]
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- msgchecksum --seed 7 --trials 200 --out results/65-msgchecksum.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:22:03Z",
+    "wall_s": 7.0
+  },
+  "summary": {
+    "clean_message_count": 60000
+  }
+}

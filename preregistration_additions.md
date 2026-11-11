@@ -127,3 +127,11 @@ Hypothesis: on 300 drop-free synthetic streams of 500 messages with adjacent-swa
 Metric: /summary/false_gap_count_strict. Expected: at least 280 of 300, expected_range [280, 300]; false_gap_count_tolerant equals 0.
 
 Falsifier: false_gap_count_strict below 280 of 300, or false_gap_count_tolerant above 0 on drop-free reordered streams.
+
+## 2026-11-11T10:21:14Z msgchecksum proposal:4869ae31075e8a6ca02112ad3557903f0ce800ee85913925a430df1a38888659
+
+Hypothesis: on 200 seeded clean streams of 300 multi-level messages (2 to 6 level updates each), a verifier that checks the top-10 CRC32 after every level update raises at least 150 false mismatches in total, while the per-message verifier raises 0, and on 200 streams with one injected single-level corruption the per-message verifier detects the corruption in the corrupted message in every trial.
+
+Metric: /arms/per_level/false_mismatch_count. Expected: at least 150, expected_range [150, 1000000]; per-message count equals 0.
+
+Falsifier: a per-level false mismatch count below 150, or any false mismatch for the per-message verifier on a clean stream, or a corruption missed by the per-message verifier in its own message.

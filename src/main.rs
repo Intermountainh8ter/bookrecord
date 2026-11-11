@@ -187,6 +187,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: per-level versus per-message top-10 checksum verification on multi-level messages, with single-level corruption.
+    Msgchecksum {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     Countercheck {
         #[arg(long, default_value_t = 7)]
         seed: u64,
@@ -1581,6 +1590,108 @@ fn truncatecheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- msgchecksum: per-level vs per-message top-10 checksum verification on multi-level messages ----
+
+const MSC_MSGS: u64 = 300;
+const MSC_DEPTH: i64 = 10;
+
+fn msc_str(p: i64, q: u32) -> (String, String) { (p.to_string(), format!("{q}.00000000")) }
+
+/// One trial. Returns (per-level false mismatches, per-message false mismatches, corruption caught in its own message).
+/// The checksum on the wire is the top-10 CRC32 after the whole message; the dense book keeps all updates inside the top ten.
+fn msc_trial(rng: &mut SplitMix, corrupt: bool) -> (u64, u64, bool) {
+    let mid = STALE_MID as i64;
+    let (mut fb, mut fa): (Side, Side) = (Side::new(), Side::new());
+    for off in 0..40i64 {
+        fb.insert(mid - 1 - off, 1 + rng.below(9) as u32);
+        fa.insert(mid + 1 + off, 1 + rng.below(9) as u32);
+    }
+    let to_s = |s: &Side| -> Vec<(String, String)> { s.iter().map(|(p, q)| msc_str(*p, *q)).collect() };
+    let (mut lv, mut pm) = (Book::default(), Book::default());
+    lv.load(&to_s(&fb), &to_s(&fa)).unwrap();
+    pm.load(&to_s(&fb), &to_s(&fa)).unwrap();
+    let bad_msg = rng.below(MSC_MSGS);
+    let (mut false_lv, mut false_pm, mut caught) = (0u64, 0u64, false);
+    for n in 0..MSC_MSGS {
+        let k = 2 + rng.below(5) as usize;
+        let mut ups: Vec<(bool, i64, u32)> = Vec::new();
+        for _ in 0..k {
+            let bid = rng.below(2) == 0;
+            let off = rng.below(MSC_DEPTH as u64) as i64;
+            let price = if bid { mid - 1 - off } else { mid + 1 + off };
+            let cur = if bid { fb[&price] } else { fa[&price] };
+            let mut q = 1 + rng.below(9) as u32;
+            if q == cur { q = q % 9 + 1; }
+            if bid { fb.insert(price, q); } else { fa.insert(price, q); }
+            ups.push((bid, price, q));
+        }
+        let mut truth = Book::default();
+        truth.load(&to_s(&fb), &to_s(&fa)).unwrap();
+        let want = kraken_checksum(&truth, 1, 8);
+        let corrupt_here = corrupt && n == bad_msg;
+        for (j, (bid, p, q)) in ups.iter().enumerate() {
+            // corruption: the last update of the chosen message is applied with quantity + 1
+            let q = if corrupt_here && j + 1 == ups.len() { *q + 1 } else { *q };
+            let m = vec![msc_str(*p, q)];
+            let (b, a) = if *bid { (m, Vec::new()) } else { (Vec::new(), m) };
+            lv.apply(&b, &a).unwrap();
+            pm.apply(&b, &a).unwrap();
+            if !corrupt && j + 1 < ups.len() && kraken_checksum(&lv, 1, 8) != want { false_lv += 1; }
+            if j + 1 == ups.len() {
+                let bad = kraken_checksum(&pm, 1, 8) != want;
+                if !corrupt && bad { false_pm += 1; }
+                if corrupt_here && bad { caught = true; }
+            }
+        }
+        if corrupt_here {
+            // resync both local books to the truth so later messages are not compared against a corrupted state
+            lv.load(&to_s(&fb), &to_s(&fa)).unwrap();
+            pm.load(&to_s(&fb), &to_s(&fa)).unwrap();
+        }
+    }
+    (false_lv, false_pm, caught)
+}
+
+fn msgchecksum(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut false_lv, mut false_pm, mut clean_msgs) = (0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let r = msc_trial(&mut rng, false);
+        false_lv += r.0;
+        false_pm += r.1;
+        clean_msgs += MSC_MSGS;
+    }
+    let mut caught = 0u64;
+    for _ in 0..trials {
+        if msc_trial(&mut rng, true).2 { caught += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "msgchecksum",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": MSC_MSGS, "updates_per_message": [2, 6], "checksum_depth": 10,
+                    "note": "the wire checksum covers the book after the whole message; the per-level verifier compares after every level update, the per-message verifier once after the last; corruption adds 1 to the quantity of a message's last update" },
+        "arms": {
+            "per_level": { "false_mismatch_count": false_lv },
+            "per_message": { "false_mismatch_count": false_pm, "corruptions_caught_in_own_message": caught, "corruption_trials": trials }
+        },
+        "summary": { "clean_message_count": clean_msgs },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- msgchecksum --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["arms"])?);
+    Ok(())
+}
+
 // ---- seqcheck: silent wrong books under message drops with an optional sequence field ----
 
 const SEQ_EVENTS: usize = 250;
@@ -2423,6 +2534,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Gappolicy { seed, trials, out } => gappolicy(seed, trials, &out),
         Cmd::Countercheck { seed, trials, out } => countercheck(seed, trials, &out),
         Cmd::Truncatecheck { seed, trials, out } => truncatecheck(seed, trials, &out),
+        Cmd::Msgchecksum { seed, trials, out } => msgchecksum(seed, trials, &out),
     }
 }
 
@@ -2629,6 +2741,20 @@ mod tests {
         truncatecheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/checksum_mismatch_count_no_truncate").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn msgchecksum_is_deterministic_and_pointer_resolves() {
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(msc_trial(&mut a, false), msc_trial(&mut b, false));
+        let r = msc_trial(&mut SplitMix(3), false);
+        assert!(r.0 > 0 && r.1 == 0);
+        assert!(msc_trial(&mut SplitMix(3), true).2);
+        let out = std::env::temp_dir().join(format!("bookrecord-msc-{}.json", std::process::id()));
+        msgchecksum(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/arms/per_level/false_mismatch_count").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
