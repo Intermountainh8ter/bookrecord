@@ -111,3 +111,11 @@ Hypothesis: on a seeded synthetic derivatives-style feed (200 trials, seed 7, on
 Metric: /summary/pu_break_missed_by_range_rule_count. Expected: at least 150 of 200, expected_range [150, 200].
 
 Falsifier: the range rule misses fewer than 150 of 200 breaks, or the pu rule misses any break or raises any false restart on clean controls.
+
+## 2026-11-11T10:00:33Z cadencecheck proposal:5451839b082bd3f36c19964c2baf71e48f6c0a2c602771394c83906dc541c32b
+
+Hypothesis: a stall detector whose silence timeout is fixed at three times the median inter-message gap of a per-message feed raises at least one false-stale alarm in at least 100 of 200 clean batched-feed trials (50 ms batches), while raising false-stale alarms in at most 10 of 200 clean per-message trials, and both configurations detect all injected true stalls.
+
+Metric: /summary/false_stale_count_batched. Expected: at least 100 of 200, expected_range [100, 200]; per-message false-stale count at most 10.
+
+Falsifier: false_stale_count_batched below 100 of 200 trials, or per-message false-stale count above 10 of 200.

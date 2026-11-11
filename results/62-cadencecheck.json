@@ -1,0 +1,37 @@
+{
+  "experiment": "cadencecheck",
+  "params": {
+    "batch_interval_us": 50000,
+    "gap_distribution_us": "uniform 2000-20000",
+    "messages_per_trial": 1000,
+    "note": "per-message gaps are bounded by construction, so the per-message arm cannot exceed the timeout; a batched feed has gaps of at least the batch interval, which exceeds the timeout by construction when the batch interval is above three median gaps. This measures the misclassification mechanism, not real-feed rates.",
+    "seed": 7,
+    "stall_us": 500000,
+    "timeout_rule": "3 x median inter-message gap of the trial's per-message feed",
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- cadencecheck --seed 7 --trials 200 --out results/62-cadencecheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-11T10:01:19Z",
+    "wall_s": 0.0
+  },
+  "summary": {
+    "false_stale_alarms_total_batched": 43886,
+    "false_stale_alarms_total_per_message": 0,
+    "false_stale_count_batched": 200,
+    "false_stale_count_per_message": 0,
+    "missed_true_stalls_batched": 0,
+    "missed_true_stalls_per_message": 0,
+    "timeout_us_sum": 6601350
+  }
+}

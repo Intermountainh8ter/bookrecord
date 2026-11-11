@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: a silence-timeout stall detector calibrated on per-message cadence, run on per-message and 50 ms-batched delivery.
+    Cadencecheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: chain breaks hidden from the spot U/u range rule on a derivatives-style feed with `pu`, plus false restarts on unknown-level removals.
     Puchain {
         #[arg(long, default_value_t = 7)]
@@ -1898,6 +1907,105 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- cadencecheck: silence-timeout stall detector under per-message and batched delivery ----
+
+const CAD_MESSAGES: usize = 1000;
+const CAD_BATCH_US: u64 = 50_000;
+const CAD_STALL_US: u64 = 500_000;
+
+/// Per-message arrival times in microseconds: gaps uniform in 2000..=20000.
+fn cadence_arrivals(rng: &mut SplitMix) -> Vec<u64> {
+    let mut t = 0u64;
+    (0..CAD_MESSAGES).map(|_| { t += 2000 + rng.below(18_001); t }).collect()
+}
+
+/// Round each arrival up to the next batch boundary; messages in one batch share a delivery time.
+fn cadence_batch(times: &[u64]) -> Vec<u64> {
+    let mut v: Vec<u64> = times.iter().map(|t| t.div_ceil(CAD_BATCH_US) * CAD_BATCH_US).collect();
+    v.dedup();
+    v
+}
+
+fn cadence_gaps(times: &[u64]) -> Vec<u64> {
+    times.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// Number of gaps above the timeout in a clean feed.
+fn cadence_false_alarms(times: &[u64], timeout: u64) -> u64 {
+    cadence_gaps(times).iter().filter(|g| **g > timeout).count() as u64
+}
+
+/// Insert a silence of `CAD_STALL_US` after index `k`; returns whether the detector alarms on exactly that gap.
+fn cadence_stall_detected(times: &[u64], k: usize, timeout: u64) -> bool {
+    let shifted: Vec<u64> = times.iter().enumerate().map(|(i, t)| if i > k { t + CAD_STALL_US } else { *t }).collect();
+    shifted[k + 1] - shifted[k] > timeout
+}
+
+/// One trial: (timeout_us, per-message false alarms, batched false alarms, per-message stall detected, batched stall detected).
+fn cadence_trial(rng: &mut SplitMix) -> (u64, u64, u64, bool, bool) {
+    let pm = cadence_arrivals(rng);
+    let mut gaps = cadence_gaps(&pm);
+    gaps.sort_unstable();
+    let timeout = 3 * gaps[gaps.len() / 2];
+    let batched = cadence_batch(&pm);
+    let k = 10 + rng.below(batched.len() as u64 - 20) as usize;
+    let kp = k.min(pm.len() - 2);
+    (
+        timeout,
+        cadence_false_alarms(&pm, timeout),
+        cadence_false_alarms(&batched, timeout),
+        cadence_stall_detected(&pm, kp, timeout),
+        cadence_stall_detected(&batched, k, timeout),
+    )
+}
+
+fn cadencecheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut fs_pm, mut fs_b, mut missed_pm, mut missed_b) = (0u64, 0u64, 0u64, 0u64);
+    let (mut alarms_pm, mut alarms_b, mut timeout_sum) = (0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (to, a_pm, a_b, d_pm, d_b) = cadence_trial(&mut rng);
+        timeout_sum += to;
+        alarms_pm += a_pm;
+        alarms_b += a_b;
+        if a_pm > 0 { fs_pm += 1; }
+        if a_b > 0 { fs_b += 1; }
+        if !d_pm { missed_pm += 1; }
+        if !d_b { missed_b += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "cadencecheck",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": CAD_MESSAGES, "batch_interval_us": CAD_BATCH_US,
+                    "stall_us": CAD_STALL_US, "gap_distribution_us": "uniform 2000-20000",
+                    "timeout_rule": "3 x median inter-message gap of the trial's per-message feed",
+                    "note": "per-message gaps are bounded by construction, so the per-message arm cannot exceed the timeout; a batched feed has gaps of at least the batch interval, which exceeds the timeout by construction when the batch interval is above three median gaps. This measures the misclassification mechanism, not real-feed rates." },
+        "summary": {
+            "false_stale_count_batched": fs_b,
+            "false_stale_count_per_message": fs_pm,
+            "false_stale_alarms_total_batched": alarms_b,
+            "false_stale_alarms_total_per_message": alarms_pm,
+            "missed_true_stalls_batched": missed_b,
+            "missed_true_stalls_per_message": missed_pm,
+            "timeout_us_sum": timeout_sum
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- cadencecheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["summary"])?);
+    Ok(())
+}
+
 // ---- puchain: spot range rule vs pu==previous-u rule on a derivatives-style feed ----
 
 const PU_EVENTS: usize = 300;
@@ -2203,6 +2311,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Puchain { seed, trials, out } => puchain(seed, trials, &out),
+        Cmd::Cadencecheck { seed, trials, out } => cadencecheck(seed, trials, &out),
         Cmd::Snapshotcheck { seed, trials, out } => snapshotcheck(seed, trials, &out),
         Cmd::Startupcheck { seed, trials, out } => startupcheck(seed, trials, &out),
         Cmd::Seqcheck { seed, trials, out } => seqcheck(seed, trials, &out),
@@ -2443,6 +2552,22 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn cadencecheck_is_deterministic_and_pointer_resolves() {
+        let mut a = SplitMix(7);
+        let mut b = SplitMix(7);
+        assert_eq!(cadence_trial(&mut a), cadence_trial(&mut b));
+        assert_eq!(cadence_batch(&[1, 2, 50_000, 50_001]), vec![50_000, 100_000]);
+        assert_eq!(cadence_false_alarms(&[0, 10, 100], 50), 1);
+        assert!(cadence_stall_detected(&[0, 10, 20, 30], 1, 100));
+        assert!(!cadence_stall_detected(&[0, 10, 20, 30], 1, 600_000));
+        let out = std::env::temp_dir().join(format!("bookrecord-cad-{}.json", std::process::id()));
+        cadencecheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/summary/false_stale_count_batched").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
