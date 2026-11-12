@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: maximum apply-queue depth under clustered versus constant-rate arrivals of equal mean rate.
+    Burstclustered {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: sequence discontinuities from a bounded receive queue at stepped message-rate bands, clustered versus evenly spaced arrivals.
     Burstgap {
         #[arg(long, default_value_t = 7)]
@@ -2234,6 +2243,77 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- burstclustered: apply-queue depth, clustered versus constant-rate arrivals of equal mean ----
+
+const BC_RATE: u64 = 2000;
+const BC_SERVICE_US: u64 = 200;
+const BC_BURST: u64 = 50;
+const BC_BURST_SPACING_US: u64 = 20;
+
+fn bc_arrivals(rng: &mut SplitMix, clustered: bool) -> Vec<u64> {
+    if !clustered {
+        return (0..BC_RATE).map(|i| i * 1_000_000 / BC_RATE).collect();
+    }
+    let bursts = BC_RATE / BC_BURST;
+    let slot = 1_000_000 / bursts;
+    let span = BC_BURST * BC_BURST_SPACING_US;
+    let mut v = Vec::with_capacity(BC_RATE as usize);
+    for k in 0..bursts {
+        let start = k * slot + rng.below(slot - span);
+        for j in 0..BC_BURST { v.push(start + j * BC_BURST_SPACING_US); }
+    }
+    v
+}
+
+/// Unbounded FIFO single server with fixed service time; returns the maximum number in system seen at an arrival.
+fn bc_max_depth(arrivals: &[u64]) -> u64 {
+    let mut done: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+    let (mut last_done, mut max) = (0u64, 0u64);
+    for &t in arrivals {
+        while done.front().is_some_and(|&d| d <= t) { done.pop_front(); }
+        last_done = last_done.max(t) + BC_SERVICE_US;
+        done.push_back(last_done);
+        max = max.max(done.len() as u64);
+    }
+    max
+}
+
+fn burstclustered(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut sum_c, mut sum_k) = (0u64, 0u64);
+    for _ in 0..trials {
+        sum_c += bc_max_depth(&bc_arrivals(&mut rng, true));
+        sum_k += bc_max_depth(&bc_arrivals(&mut rng, false));
+    }
+    let n = trials.max(1) as f64;
+    let (mean_c, mean_k) = (sum_c as f64 / n, sum_k as f64 / n);
+    let ratio = if mean_k > 0.0 { mean_c / mean_k } else { 0.0 };
+    let res = serde_json::json!({
+        "experiment": "burstclustered",
+        "params": { "seed": seed, "trials": trials, "messages_per_second": BC_RATE, "service_us": BC_SERVICE_US,
+                    "burst_messages": BC_BURST, "burst_spacing_us": BC_BURST_SPACING_US,
+                    "note": "unbounded FIFO single server, one second of arrivals; clustered bursts placed uniformly within equal slots versus evenly spaced arrivals of the same count" },
+        "mean_max_depth_clustered": mean_c,
+        "mean_max_depth_constant": mean_k,
+        "queue_depth_ratio": ratio,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- burstclustered --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic arrival process (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
 // ---- burstgap: sequence discontinuities from a bounded receive queue per message-rate band ----
 
 const BG_RATES: [u64; 4] = [500, 1500, 3000, 4900];
@@ -3034,6 +3114,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Burstclustered { seed, trials, out } => burstclustered(seed, trials, &out),
         Cmd::Burstgap { seed, trials, out } => burstgap(seed, trials, &out),
         Cmd::Cadencestep { seed, trials, out } => cadencestep(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
@@ -3328,6 +3409,19 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn burstclustered_depth_and_pointer() {
+        assert_eq!(bc_max_depth(&[0, 1000, 2000]), 1);
+        assert_eq!(bc_max_depth(&[0; 10]), 10);
+        let (mut a, mut b) = (SplitMix(7), SplitMix(7));
+        assert_eq!(bc_arrivals(&mut a, true), bc_arrivals(&mut b, true));
+        let out = std::env::temp_dir().join(format!("bookrecord-bc-{}.json", std::process::id()));
+        burstclustered(7, 2, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/queue_depth_ratio").is_some());
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

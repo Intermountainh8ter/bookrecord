@@ -1,0 +1,30 @@
+{
+  "experiment": "burstclustered",
+  "mean_max_depth_clustered": 68.175,
+  "mean_max_depth_constant": 1.0,
+  "params": {
+    "burst_messages": 50,
+    "burst_spacing_us": 20,
+    "messages_per_second": 2000,
+    "note": "unbounded FIFO single server, one second of arrivals; clustered bursts placed uniformly within equal slots versus evenly spaced arrivals of the same count",
+    "seed": 7,
+    "service_us": 200,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- burstclustered --seed 7 --trials 200 --out results/105-burstclustered.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic arrival process (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-12T12:53:33Z",
+    "wall_s": 0.0
+  },
+  "queue_depth_ratio": 68.175
+}

@@ -183,3 +183,11 @@ Hypothesis: with a fixed-capacity receive queue that drops the newest frame when
 Metric: /bands/0/gap_count. Expected: equal to 0 in band 0 and the top band count exceeds band 0, expected_range [0, 0].
 
 Falsifier: a nonzero gap count in the lowest band, or a top-band gap count not above the lowest band, or evenly spaced arrivals producing at least as many gaps as clustered bursts.
+
+## 2026-11-12T12:53:30Z burstclustered proposal:a916bb458d4ef531b6441843085b964b9960585365dbe9162fa5345d3399e065
+
+Hypothesis: at equal mean arrival rate and a fixed per-message apply service time, clustered arrivals leave a maximum apply-queue depth at least 3 times that of constant-rate arrivals, averaged over 200 seeded trials.
+
+Metric: /queue_depth_ratio. Expected: at least 3.0, expected_range [3.0, 1000.0].
+
+Falsifier: a queue_depth_ratio below 3.0 at seed 7.
