@@ -191,3 +191,11 @@ Hypothesis: at equal mean arrival rate and a fixed per-message apply service tim
 Metric: /queue_depth_ratio. Expected: at least 3.0, expected_range [3.0, 1000.0].
 
 Falsifier: a queue_depth_ratio below 3.0 at seed 7.
+
+## 2026-11-12T13:07:44Z snapstitch proposal:3247dd00364c84c3fd51677c48f91b8faaf3f036fbd02d4e1ed3362c0f207d23
+
+Hypothesis: on a seeded synthetic stream where the first live event begins after the snapshot update ID plus one in a share of trials, naive stitching (apply first live event without bracket check) leaves at least one missed update in more trials than overlap-checked stitching, which leaves zero.
+
+Metric: /missed_gaps. Expected: at least 50 of 200 trials for naive stitching, overlap-checked leaves 0, expected_range [50, 200].
+
+Falsifier: overlap-checked stitching leaves any missed update, or naive stitching misses in fewer than 50 of 200 trials.

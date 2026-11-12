@@ -1,0 +1,31 @@
+{
+  "experiment": "snapstitch",
+  "late_start_trials": 89,
+  "missed_gaps": 89,
+  "missed_gaps_checked": 0,
+  "missed_updates_checked": 0,
+  "missed_updates_naive": 284,
+  "params": {
+    "late_share_pct": 50,
+    "max_skip": 5,
+    "note": "synthetic; naive stitching applies the first live event unchecked, overlap-checked stitching requires U <= snapshot+1 <= u and resyncs otherwise; the zero for checked stitching is close to a property of the harness",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- snapstitch --seed 7 --trials 200 --out results/109-snapstitch.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-12T13:08:19Z",
+    "wall_s": 0.0
+  },
+  "resyncs_checked": 89
+}

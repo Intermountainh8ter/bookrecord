@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: updates missed between a REST snapshot and the first live event, naive versus overlap-checked stitching.
+    Snapstitch {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: sequence discontinuities from a bounded receive queue at stepped message-rate bands, clustered versus evenly spaced arrivals.
     Burstgap {
         #[arg(long, default_value_t = 7)]
@@ -2314,6 +2323,70 @@ fn burstclustered(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- snapstitch: updates lost between a REST snapshot and the first live event ----
+
+const SS_LATE_SHARE_PCT: u64 = 50;
+const SS_MAX_SKIP: u64 = 5;
+
+/// First live event (U, u) for a snapshot at update ID `snap`; with `late`, it starts `skip` IDs after snap + 1.
+fn ss_first_event(rng: &mut SplitMix, snap: u64, late: bool) -> (u64, u64) {
+    let skip = if late { 1 + rng.below(SS_MAX_SKIP) } else { 0 };
+    let first = snap + 1 + skip;
+    (first, first + rng.below(4))
+}
+
+/// Updates with ID in (snap, first_u) never applied if the first live event is applied as is.
+fn ss_missed(snap: u64, first_u: u64) -> u64 { first_u.saturating_sub(snap + 1) }
+
+/// Overlap-checked stitching: keep the event only if U <= snap + 1 <= u, otherwise resync (None).
+fn ss_overlap_ok(snap: u64, ev: (u64, u64)) -> bool { ev.0 <= snap + 1 && snap + 1 <= ev.1 }
+
+fn snapstitch(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut naive_trials, mut naive_updates, mut checked_trials, mut checked_updates) = (0u64, 0u64, 0u64, 0u64);
+    let (mut late_trials, mut resyncs) = (0u64, 0u64);
+    for _ in 0..trials {
+        let snap = 1_000 + rng.below(1_000_000);
+        let late = rng.below(100) < SS_LATE_SHARE_PCT;
+        if late { late_trials += 1; }
+        let ev = ss_first_event(&mut rng, snap, late);
+        let m = ss_missed(snap, ev.0);
+        if m > 0 { naive_trials += 1; naive_updates += m; }
+        // overlap-checked: on a failed bracket, resync with a fresh snapshot just before the stream, then re-check.
+        let (mut s, mut e) = (snap, ev);
+        if !ss_overlap_ok(s, e) { resyncs += 1; s = e.0.saturating_sub(1); e = (e.0, e.1); }
+        assert!(ss_overlap_ok(s, e));
+        let m2 = ss_missed(s, e.0);
+        if m2 > 0 { checked_trials += 1; checked_updates += m2; }
+    }
+    let res = serde_json::json!({
+        "experiment": "snapstitch",
+        "params": { "seed": seed, "trials": trials, "late_share_pct": SS_LATE_SHARE_PCT, "max_skip": SS_MAX_SKIP,
+                    "note": "synthetic; naive stitching applies the first live event unchecked, overlap-checked stitching requires U <= snapshot+1 <= u and resyncs otherwise; the zero for checked stitching is close to a property of the harness" },
+        "missed_gaps": naive_trials,
+        "missed_updates_naive": naive_updates,
+        "missed_gaps_checked": checked_trials,
+        "missed_updates_checked": checked_updates,
+        "late_start_trials": late_trials,
+        "resyncs_checked": resyncs,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- snapstitch --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
 // ---- burstgap: sequence discontinuities from a bounded receive queue per message-rate band ----
 
 const BG_RATES: [u64; 4] = [500, 1500, 3000, 4900];
@@ -3115,6 +3188,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Burstclustered { seed, trials, out } => burstclustered(seed, trials, &out),
+        Cmd::Snapstitch { seed, trials, out } => snapstitch(seed, trials, &out),
         Cmd::Burstgap { seed, trials, out } => burstgap(seed, trials, &out),
         Cmd::Cadencestep { seed, trials, out } => cadencestep(seed, trials, &out),
         Cmd::Seqproduct { seed, trials, out } => seqproduct(seed, trials, &out),
@@ -3422,6 +3496,20 @@ mod tests {
         burstclustered(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/queue_depth_ratio").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn snapstitch_counts_and_pointer() {
+        assert_eq!(ss_missed(10, 11), 0);
+        assert_eq!(ss_missed(10, 14), 3);
+        assert!(ss_overlap_ok(10, (8, 12)));
+        assert!(!ss_overlap_ok(10, (13, 15)));
+        let out = std::env::temp_dir().join(format!("bookrecord-ss-{}.json", std::process::id()));
+        snapstitch(7, 50, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert!(v.pointer("/missed_gaps").is_some());
+        assert_eq!(v.pointer("/missed_gaps_checked").unwrap().as_u64(), Some(0));
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

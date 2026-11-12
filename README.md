@@ -189,3 +189,9 @@ Reproduce: `cargo run --locked -q --release -- burstgap --seed 7 --trials 200 --
 `bookrecord burstclustered` feeds a single-server apply queue with clustered and evenly spaced arrivals of equal mean rate (200 trials). Result in `results/105-burstclustered.json`: mean maximum queue depth 68.175 clustered against 1.0 constant, queue_depth_ratio 68.175. The pre-registered expectation (ratio at least 3.0) held. The result follows from the harness: bursts are placed to exceed the service rate. The stream is synthetic; this says nothing about real feeds.
 
 Reproduce: `cargo run --locked -q --release -- burstclustered --seed 7 --trials 200 --out results/105-burstclustered.json`
+
+## Snapshot stitching (synthetic, seed 7)
+
+`bookrecord snapstitch` compares naive stitching (apply the first live event unchecked) with overlap-checked stitching (require the first event to bracket the snapshot update ID plus one, else resync) over 200 trials. Result in `results/109-snapstitch.json`: naive stitching missed updates in 89 of 200 trials (284 updates in total); overlap-checked stitching missed 0. The pre-registered expectation (at least 50 of 200) held. The zero is close to a property of the harness. The stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- snapstitch --seed 7 --trials 200 --out results/109-snapstitch.json`
