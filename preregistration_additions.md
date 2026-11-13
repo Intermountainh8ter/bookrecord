@@ -215,3 +215,11 @@ Hypothesis: on a seeded synthetic trade stream where trade_id continues across a
 Metric: /trade_id/false_gaps (restart-assuming recorder, summed over trials). Expected: at least 100 of 200 trials, expected_range [100, 1000]; continue-counting records 0.
 
 Falsifier: the continue-counting recorder raises any false gap on streams where ids continue, or the reset recorder misses 0 real gaps straddling a reconnect.
+
+## 2026-11-13T14:03:07Z symbolrename proposal:3aaee7d376c14459cb364929306c67d27970d3208a8fe072d1c048ca5d847413
+
+Hypothesis: on a seeded synthetic stream with a mid-stream symbol rename and a continuous per-book sequence, a symbol-keyed recorder without an alias table produces two books per trial after the cutover (mean 2.0) while a recorder with an alias table produces one (1.0), and the sequence chain check raises zero gaps in both arms.
+
+Metric: /symbol_rename/books_after_cutover (no-alias mean). Expected: 2.0, expected_range [2.0, 2.0]; alias arm exactly 1.0.
+
+Falsifier: a no-alias mean below 2.0, any gap raised by the chain check in either arm, or an alias-table recorder with more than one book.

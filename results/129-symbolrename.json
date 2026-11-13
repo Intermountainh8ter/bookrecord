@@ -1,0 +1,32 @@
+{
+  "experiment": "symbolrename",
+  "params": {
+    "messages_per_trial": 1000,
+    "note": "one rename per trial (XBT/USD to BTC/USD), per-book sequence continuous across it",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- symbolrename --seed 7 --trials 200 --out results/129-symbolrename.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-13T14:03:39Z",
+    "wall_s": 0.0
+  },
+  "symbol_rename": {
+    "alias_trials_with_more_than_one_book": 0,
+    "books_after_cutover": 2.0,
+    "books_after_cutover_alias": 1.0,
+    "gap_events_alias": 0,
+    "gap_events_no_alias": 0,
+    "orphaned_levels_no_alias_total": 9705
+  }
+}

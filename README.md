@@ -207,3 +207,9 @@ Reproduce: `cargo run --locked -q --release -- unseqcheck --seed 7 --trials 200 
 `bookrecord tradeidcheck` runs a seeded synthetic trade stream (200 trials, 1000 messages, one reconnect per trial, ids continuing across it) through three recorders, with and without one dropped id straddling the reconnect. Result in `results/127-tradeidcheck.json`: the restart-assuming recorder raised 200 false gaps, the continue-counting and reset-on-reconnect recorders raised 0, the continue-counting recorder caught 200 of 200 straddling drops, and the reset recorder missed 200 of 200. The pre-registered expectation (at least 100 false gaps for the restart-assuming recorder) held. The harness assumes ids continue; whether a venue's ids do is not tested here. The stream is synthetic; this says nothing about real feeds.
 
 Reproduce: `cargo run --locked -q --release -- tradeidcheck --seed 7 --trials 200 --out results/127-tradeidcheck.json`
+
+## Symbol rename (synthetic, seed 7)
+
+`bookrecord symbolrename` renames a pair's symbol mid-stream (200 trials, 1000 messages, per-book sequence continuous). Result in `results/129-symbolrename.json`: a symbol-keyed recorder without an alias table held 2.0 books per trial after the cutover, one with an alias table held 1.0, and the sequence chain check raised 0 gap events in both arms. The stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- symbolrename --seed 7 --trials 200 --out results/129-symbolrename.json`

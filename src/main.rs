@@ -114,6 +114,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: a mid-stream symbol rename seen by a symbol-keyed recorder with and without an alias table.
+    Symbolrename {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a drop-lower-sequence recorder versus a keyed per-level-guard recorder under local reorder and duplicate delivery.
     Ordercheck {
         #[arg(long, default_value_t = 7)]
@@ -2270,6 +2279,73 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- symbolrename: symbol-keyed recorder across a mid-stream rename ----
+
+const SR_MESSAGES: u64 = 1000;
+
+/// One trial: a single book whose symbol is renamed at message k, sequence continuous.
+/// Returns (books_no_alias, books_alias, orphaned_levels_no_alias, gaps_no_alias, gaps_alias).
+fn symbolrename_trial(rng: &mut SplitMix) -> (u64, u64, u64, u64, u64) {
+    use std::collections::{HashMap, HashSet};
+    let k = 10 + rng.below(SR_MESSAGES - 20);
+    let alias = |s: &str| if s == "XBT/USD" { "BTC/USD".to_string() } else { s.to_string() };
+    let mut plain: HashMap<String, (HashSet<u64>, Option<u64>)> = HashMap::new();
+    let mut aliased: HashMap<String, (HashSet<u64>, Option<u64>)> = HashMap::new();
+    let (mut gaps_p, mut gaps_a) = (0u64, 0u64);
+    for seq in 1..=SR_MESSAGES {
+        let sym = if seq <= k { "XBT/USD" } else { "BTC/USD" };
+        let level = rng.below(50);
+        for (map, key, gaps) in [(&mut plain, sym.to_string(), &mut gaps_p), (&mut aliased, alias(sym), &mut gaps_a)] {
+            let e = map.entry(key).or_insert_with(|| (HashSet::new(), None));
+            // per-book chain check: next message in a book must carry previous seq + 1
+            if let Some(prev) = e.1 { if seq != prev + 1 { *gaps += 1; } }
+            e.0.insert(level);
+            e.1 = Some(seq);
+        }
+    }
+    let orphaned = plain.get("XBT/USD").map(|b| b.0.len() as u64).unwrap_or(0);
+    (plain.len() as u64, aliased.len() as u64, orphaned, gaps_p, gaps_a)
+}
+
+fn symbolrename(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut bp, mut ba, mut orph, mut gp, mut ga, mut multi_alias) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (a, b, o, g1, g2) = symbolrename_trial(&mut rng);
+        bp += a; ba += b; orph += o; gp += g1; ga += g2;
+        if b > 1 { multi_alias += 1; }
+    }
+    let n = trials as f64;
+    let res = serde_json::json!({
+        "experiment": "symbolrename",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": SR_MESSAGES,
+                    "note": "one rename per trial (XBT/USD to BTC/USD), per-book sequence continuous across it" },
+        "symbol_rename": {
+            "books_after_cutover": bp as f64 / n,
+            "books_after_cutover_alias": ba as f64 / n,
+            "orphaned_levels_no_alias_total": orph,
+            "gap_events_no_alias": gp,
+            "gap_events_alias": ga,
+            "alias_trials_with_more_than_one_book": multi_alias,
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- symbolrename --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["symbol_rename"])?);
+    Ok(())
+}
+
 // ---- tradeidcheck: trade_id continuity across reconnects ----
 
 const TID_MESSAGES: u64 = 1000;
@@ -3336,6 +3412,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
         Cmd::Tradeidcheck { seed, trials, out } => tradeidcheck(seed, trials, &out),
+        Cmd::Symbolrename { seed, trials, out } => symbolrename(seed, trials, &out),
         Cmd::Unseqcheck { seed, trials, out } => unseqcheck(seed, trials, &out),
         Cmd::Burstclustered { seed, trials, out } => burstclustered(seed, trials, &out),
         Cmd::Snapstitch { seed, trials, out } => snapstitch(seed, trials, &out),
@@ -3644,6 +3721,18 @@ mod tests {
         tradeidcheck(7, 3, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(v.pointer("/trade_id/false_gaps").unwrap().as_u64(), Some(3));
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn symbolrename_books_and_pointer() {
+        let (p, a, o, g1, g2) = symbolrename_trial(&mut SplitMix(7));
+        assert_eq!((p, a, g1, g2), (2, 1, 0, 0));
+        assert!(o > 0);
+        let out = std::env::temp_dir().join(format!("bookrecord-sr-{}.json", std::process::id()));
+        symbolrename(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.pointer("/symbol_rename/books_after_cutover").unwrap().as_f64(), Some(2.0));
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 
