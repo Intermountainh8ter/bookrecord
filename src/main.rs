@@ -96,6 +96,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: sequence-continuity drop detection on a sequenced versus an unsequenced channel.
+    Unseqcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a drop-lower-sequence recorder versus a keyed per-level-guard recorder under local reorder and duplicate delivery.
     Ordercheck {
         #[arg(long, default_value_t = 7)]
@@ -2252,6 +2261,65 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- unseqcheck: sequence-continuity drop detection, sequenced versus unsequenced channel ----
+
+const US_MESSAGES: u64 = 1000;
+
+/// Counts continuity breaks in a delivered sequence-number list (any step other than +1).
+fn us_breaks(seqs: &[u64]) -> u64 {
+    seqs.windows(2).filter(|w| w[1] != w[0] + 1).count() as u64
+}
+
+/// Returns (sequenced breaks, unsequenced breaks) for one trial; the unsequenced channel carries
+/// no counter, so the recorder sees a constant placeholder and the continuity check cannot fire.
+fn unseq_trial(rng: &mut SplitMix, inject: bool) -> (u64, u64) {
+    // drop is placed strictly inside the stream so a break is visible to a successor check
+    let drop_at = 1 + rng.below(US_MESSAGES - 2);
+    let kept: Vec<u64> = (0..US_MESSAGES).filter(|i| !(inject && *i == drop_at)).collect();
+    let unseq: Vec<u64> = kept.iter().map(|_| 0).collect();
+    let flat = unseq.windows(2).filter(|w| w[1] != w[0]).count() as u64;
+    (us_breaks(&kept), flat)
+}
+
+fn unseqcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let (mut seq_det, mut unseq_det) = (0u64, 0u64);
+    for _ in 0..trials {
+        let (a, b) = unseq_trial(&mut rng, true);
+        if a > 0 { seq_det += 1; }
+        if b > 0 { unseq_det += 1; }
+    }
+    let (mut seq_fp, mut unseq_fp) = (0u64, 0u64);
+    for _ in 0..trials {
+        let (a, b) = unseq_trial(&mut rng, false);
+        if a > 0 { seq_fp += 1; }
+        if b > 0 { unseq_fp += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "unseqcheck",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": US_MESSAGES, "drops_per_trial": 1,
+                    "note": "one message dropped per trial per channel; continuity detector flags any sequence step other than +1; the unsequenced channel has no counter" },
+        "sequenced": { "injected_drop_count": trials, "detected_drop_count": seq_det, "undetected_drop_count": trials - seq_det },
+        "unsequenced": { "injected_drop_count": trials, "detected_drop_count": unseq_det, "undetected_drop_count": trials - unseq_det },
+        "control": { "trials": trials, "sequenced_alarm_count": seq_fp, "unsequenced_alarm_count": unseq_fp },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- unseqcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
 // ---- burstclustered: apply-queue depth, clustered versus constant-rate arrivals of equal mean ----
 
 const BC_RATE: u64 = 2000;
@@ -3187,6 +3255,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Unseqcheck { seed, trials, out } => unseqcheck(seed, trials, &out),
         Cmd::Burstclustered { seed, trials, out } => burstclustered(seed, trials, &out),
         Cmd::Snapstitch { seed, trials, out } => snapstitch(seed, trials, &out),
         Cmd::Burstgap { seed, trials, out } => burstgap(seed, trials, &out),
@@ -3483,6 +3552,20 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn unseqcheck_detects_only_sequenced_and_pointer_resolves() {
+        assert_eq!(us_breaks(&[1, 2, 4, 5]), 1);
+        assert_eq!(us_breaks(&[1, 2, 3]), 0);
+        assert_eq!(unseq_trial(&mut SplitMix(7), true), (1, 0));
+        assert_eq!(unseq_trial(&mut SplitMix(7), false), (0, 0));
+        let out = std::env::temp_dir().join(format!("bookrecord-us-{}.json", std::process::id()));
+        unseqcheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.pointer("/unsequenced/undetected_drop_count").unwrap(), 3);
+        assert_eq!(v.pointer("/sequenced/detected_drop_count").unwrap(), 3);
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

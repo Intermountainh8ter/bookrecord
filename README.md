@@ -195,3 +195,9 @@ Reproduce: `cargo run --locked -q --release -- burstclustered --seed 7 --trials 
 `bookrecord snapstitch` compares naive stitching (apply the first live event unchecked) with overlap-checked stitching (require the first event to bracket the snapshot update ID plus one, else resync) over 200 trials. Result in `results/109-snapstitch.json`: naive stitching missed updates in 89 of 200 trials (284 updates in total); overlap-checked stitching missed 0. The pre-registered expectation (at least 50 of 200) held. The zero is close to a property of the harness. The stream is synthetic; this says nothing about real feeds.
 
 Reproduce: `cargo run --locked -q --release -- snapstitch --seed 7 --trials 200 --out results/109-snapstitch.json`
+
+## Sequenced versus unsequenced channel (synthetic, seed 7)
+
+`bookrecord unseqcheck` drops one message per trial (200 trials, 1000 messages) from a sequenced and an unsequenced channel and runs a sequence-continuity detector on both, plus 200 no-drop controls. Result in `results/123-unseqcheck.json`: the detector flagged 200 of 200 drops on the sequenced channel and 0 of 200 on the unsequenced channel (undetected count 200), with 0 alarms on either channel in the controls. The pre-registered expectation held. This is true by construction: a channel without a counter cannot show a gap. The stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- unseqcheck --seed 7 --trials 200 --out results/123-unseqcheck.json`

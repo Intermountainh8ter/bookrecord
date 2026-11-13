@@ -1,0 +1,40 @@
+{
+  "control": {
+    "sequenced_alarm_count": 0,
+    "trials": 200,
+    "unsequenced_alarm_count": 0
+  },
+  "experiment": "unseqcheck",
+  "params": {
+    "drops_per_trial": 1,
+    "messages_per_trial": 1000,
+    "note": "one message dropped per trial per channel; continuity detector flags any sequence step other than +1; the unsequenced channel has no counter",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- unseqcheck --seed 7 --trials 200 --out results/123-unseqcheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-13T13:42:25Z",
+    "wall_s": 0.0
+  },
+  "sequenced": {
+    "detected_drop_count": 200,
+    "injected_drop_count": 200,
+    "undetected_drop_count": 0
+  },
+  "unsequenced": {
+    "detected_drop_count": 0,
+    "injected_drop_count": 200,
+    "undetected_drop_count": 200
+  }
+}

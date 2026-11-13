@@ -199,3 +199,11 @@ Hypothesis: on a seeded synthetic stream where the first live event begins after
 Metric: /missed_gaps. Expected: at least 50 of 200 trials for naive stitching, overlap-checked leaves 0, expected_range [50, 200].
 
 Falsifier: overlap-checked stitching leaves any missed update, or naive stitching misses in fewer than 50 of 200 trials.
+
+## 2026-11-13T13:41:50Z unseqcheck proposal:04be7fcd20085ae3dd5408f6a50295a54436548cf3c9aa11662be575cdc4cb17
+
+Hypothesis: on a seeded synthetic stream (seed 7, 200 trials, 1000 messages, one injected drop per trial per channel), a sequence-continuity detector flags 200 of 200 drops on the sequenced channel and 0 of 200 on the unsequenced channel, so the unsequenced undetected count is 200, and the no-injection control raises 0 alarms on both channels.
+
+Metric: /unsequenced/undetected_drop_count. Expected: equal to 200, expected_range [200, 200].
+
+Falsifier: an unsequenced undetected count below 200, a sequenced detected count below 200, or any control alarm above 0.
