@@ -105,6 +105,15 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: trade_id continuity across reconnects for continue-counting, reset-on-reconnect and restart-assuming recorders.
+    Tradeidcheck {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200)]
+        trials: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a drop-lower-sequence recorder versus a keyed per-level-guard recorder under local reorder and duplicate delivery.
     Ordercheck {
         #[arg(long, default_value_t = 7)]
@@ -2261,6 +2270,77 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- tradeidcheck: trade_id continuity across reconnects ----
+
+const TID_MESSAGES: u64 = 1000;
+
+/// Returns (continue-counting, reset-on-reconnect, restart-assuming) gap counts for one trial.
+/// Ids continue across the single reconnect; when `inject` is set one id straddling the reconnect is dropped.
+fn tradeid_trial(rng: &mut SplitMix, inject: bool) -> (u64, u64, u64) {
+    let k = 10 + rng.below(TID_MESSAGES - 20); // reconnect after the k-th delivered id
+    let mut ids: Vec<u64> = (1..=TID_MESSAGES).collect();
+    if inject { ids.remove(k as usize); } // id k+1 dropped: last before reconnect is k, first after is k+2
+    let (mut cont, mut reset, mut restart) = (0u64, 0u64, 0u64);
+    for i in 1..ids.len() {
+        let reconnect = i as u64 == k;
+        if reconnect {
+            if ids[i] != 1 { restart += 1; }
+            // reset recorder re-baselines on the first id after a reconnect
+        } else {
+            if ids[i] != ids[i - 1] + 1 { reset += 1; restart += 1; }
+        }
+        if ids[i] != ids[i - 1] + 1 { cont += 1; }
+    }
+    (cont, reset, restart)
+}
+
+fn tradeidcheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    // control: ids continue, no real drop, so every gap raised is false
+    let (mut c_fp, mut rs_fp, mut rt_fp) = (0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (c, rs, rt) = tradeid_trial(&mut rng, false);
+        c_fp += c; rs_fp += rs; rt_fp += rt;
+    }
+    // injected: one real drop straddling the reconnect
+    let (mut c_hit, mut rs_hit, mut rt_hit) = (0u64, 0u64, 0u64);
+    for _ in 0..trials {
+        let (c, rs, rt) = tradeid_trial(&mut rng, true);
+        if c > 0 { c_hit += 1; }
+        if rs > 0 { rs_hit += 1; }
+        if rt > 0 { rt_hit += 1; }
+    }
+    let res = serde_json::json!({
+        "experiment": "tradeidcheck",
+        "params": { "seed": seed, "trials": trials, "messages_per_trial": TID_MESSAGES,
+                    "note": "one reconnect per trial, trade_id continues across it; injected trials drop one id straddling the reconnect" },
+        "trade_id": {
+            "false_gaps": rt_fp,
+            "continue_false_gaps": c_fp,
+            "reset_false_gaps": rs_fp,
+            "continue_caught_straddling_drops": c_hit,
+            "reset_caught_straddling_drops": rs_hit,
+            "reset_missed_straddling_drops": trials - rs_hit,
+            "restart_caught_straddling_drops": rt_hit,
+        },
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- tradeidcheck --seed {seed} --trials {trials} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res["trade_id"])?);
+    Ok(())
+}
+
 // ---- unseqcheck: sequence-continuity drop detection, sequenced versus unsequenced channel ----
 
 const US_MESSAGES: u64 = 1000;
@@ -3255,6 +3335,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Tradeidcheck { seed, trials, out } => tradeidcheck(seed, trials, &out),
         Cmd::Unseqcheck { seed, trials, out } => unseqcheck(seed, trials, &out),
         Cmd::Burstclustered { seed, trials, out } => burstclustered(seed, trials, &out),
         Cmd::Snapstitch { seed, trials, out } => snapstitch(seed, trials, &out),
@@ -3552,6 +3633,17 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn tradeidcheck_recorders_and_pointer_resolves() {
+        assert_eq!(tradeid_trial(&mut SplitMix(7), false), (0, 0, 1));
+        assert_eq!(tradeid_trial(&mut SplitMix(7), true), (1, 0, 1));
+        let out = std::env::temp_dir().join(format!("bookrecord-tid-{}.json", std::process::id()));
+        tradeidcheck(7, 3, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.pointer("/trade_id/false_gaps").unwrap().as_u64(), Some(3));
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

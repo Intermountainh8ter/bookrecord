@@ -207,3 +207,11 @@ Hypothesis: on a seeded synthetic stream (seed 7, 200 trials, 1000 messages, one
 Metric: /unsequenced/undetected_drop_count. Expected: equal to 200, expected_range [200, 200].
 
 Falsifier: an unsequenced undetected count below 200, a sequenced detected count below 200, or any control alarm above 0.
+
+## 2026-11-13T13:56:54Z tradeidcheck proposal:97a1b564f0f910379b1ddc6bdf71c88be2408d6694c1b1f948631564c5ad0ca1
+
+Hypothesis: on a seeded synthetic trade stream where trade_id continues across a reconnect (no real gap), a recorder that assumes ids restart at one raises a false gap on every reconnect, a recorder that resets its expected id on reconnect misses every real drop that straddles a reconnect, and the continue-counting recorder raises 0 false gaps and catches all injected straddling drops.
+
+Metric: /trade_id/false_gaps (restart-assuming recorder, summed over trials). Expected: at least 100 of 200 trials, expected_range [100, 1000]; continue-counting records 0.
+
+Falsifier: the continue-counting recorder raises any false gap on streams where ids continue, or the reset recorder misses 0 real gaps straddling a reconnect.

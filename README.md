@@ -201,3 +201,9 @@ Reproduce: `cargo run --locked -q --release -- snapstitch --seed 7 --trials 200 
 `bookrecord unseqcheck` drops one message per trial (200 trials, 1000 messages) from a sequenced and an unsequenced channel and runs a sequence-continuity detector on both, plus 200 no-drop controls. Result in `results/123-unseqcheck.json`: the detector flagged 200 of 200 drops on the sequenced channel and 0 of 200 on the unsequenced channel (undetected count 200), with 0 alarms on either channel in the controls. The pre-registered expectation held. This is true by construction: a channel without a counter cannot show a gap. The stream is synthetic; this says nothing about real feeds.
 
 Reproduce: `cargo run --locked -q --release -- unseqcheck --seed 7 --trials 200 --out results/123-unseqcheck.json`
+
+## Trade-id continuity across reconnects (synthetic, seed 7)
+
+`bookrecord tradeidcheck` runs a seeded synthetic trade stream (200 trials, 1000 messages, one reconnect per trial, ids continuing across it) through three recorders, with and without one dropped id straddling the reconnect. Result in `results/127-tradeidcheck.json`: the restart-assuming recorder raised 200 false gaps, the continue-counting and reset-on-reconnect recorders raised 0, the continue-counting recorder caught 200 of 200 straddling drops, and the reset recorder missed 200 of 200. The pre-registered expectation (at least 100 false gaps for the restart-assuming recorder) held. The harness assumes ids continue; whether a venue's ids do is not tested here. The stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- tradeidcheck --seed 7 --trials 200 --out results/127-tradeidcheck.json`

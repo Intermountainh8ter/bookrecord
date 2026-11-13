@@ -1,0 +1,33 @@
+{
+  "experiment": "tradeidcheck",
+  "params": {
+    "messages_per_trial": 1000,
+    "note": "one reconnect per trial, trade_id continues across it; injected trials drop one id straddling the reconnect",
+    "seed": 7,
+    "trials": 200
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- tradeidcheck --seed 7 --trials 200 --out results/127-tradeidcheck.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-13T13:57:37Z",
+    "wall_s": 0.0
+  },
+  "trade_id": {
+    "continue_caught_straddling_drops": 200,
+    "continue_false_gaps": 0,
+    "false_gaps": 200,
+    "reset_caught_straddling_drops": 0,
+    "reset_false_gaps": 0,
+    "reset_missed_straddling_drops": 200,
+    "restart_caught_straddling_drops": 200
+  }
+}
