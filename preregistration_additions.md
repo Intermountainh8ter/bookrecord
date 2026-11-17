@@ -223,3 +223,11 @@ Hypothesis: on a seeded synthetic stream with a mid-stream symbol rename and a c
 Metric: /symbol_rename/books_after_cutover (no-alias mean). Expected: 2.0, expected_range [2.0, 2.0]; alias arm exactly 1.0.
 
 Falsifier: a no-alias mean below 2.0, any gap raised by the chain check in either arm, or an alias-table recorder with more than one book.
+
+## 2026-11-17T19:03:53Z applyover proposal:d072f379ab6eb7a1f51d0115bf9870dd54e8c5a993b4f4fb3f9ccc4888566164
+
+Hypothesis: on a seeded synthetic stream of 200000 diff messages in bursts of 50 touching up to 20 levels each, the real Book::apply never exceeds the 50 ms Coinbase level2_batch cadence: zero of 200000 applies take longer than 50 ms.
+
+Metric: /over_cadence_count. Expected: equal to 0, expected_range [0, 0]. Only exceedance counts are written, no raw timings.
+
+Falsifier: any apply taking longer than 50 ms (over_cadence_count above 0).

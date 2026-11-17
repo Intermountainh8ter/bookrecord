@@ -123,6 +123,17 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Seeded synthetic experiment: time the real Book::apply over a burst stream and count applies slower than the venue cadence.
+    Applyover {
+        #[arg(long, default_value_t = 7)]
+        seed: u64,
+        #[arg(long, default_value_t = 200000)]
+        messages: u64,
+        #[arg(long, default_value_t = 50)]
+        cadence_ms: u64,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Seeded synthetic experiment: a drop-lower-sequence recorder versus a keyed per-level-guard recorder under local reorder and duplicate delivery.
     Ordercheck {
         #[arg(long, default_value_t = 7)]
@@ -2279,6 +2290,84 @@ fn ordercheck(seed: u64, trials: u64, out: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- applyover: real Book::apply timed over a seeded burst stream ----
+
+const AO_BURST: u64 = 50;
+const AO_MAX_LEVELS: u64 = 20;
+const AO_BASE_LEVELS: u64 = 100;
+
+type AoSide = Vec<(String, String)>;
+
+fn ao_level(rng: &mut SplitMix, side_bid: bool) -> (String, String) {
+    let off = rng.below(AO_BASE_LEVELS * 2);
+    let px = if side_bid { 100_000 - off } else { 100_001 + off };
+    let qty = if rng.below(4) == 0 { 0 } else { 1 + rng.below(9) };
+    (format!("{px}.00"), format!("{qty}.5"))
+}
+
+/// Pre-built (bids, asks) diff messages; generation is outside the timed region.
+fn ao_messages(rng: &mut SplitMix, n: u64) -> Vec<(AoSide, AoSide)> {
+    (0..n)
+        .map(|_| {
+            let k = 1 + rng.below(AO_MAX_LEVELS);
+            let (mut b, mut a) = (Vec::new(), Vec::new());
+            for _ in 0..k {
+                if rng.below(2) == 0 { b.push(ao_level(rng, true)); } else { a.push(ao_level(rng, false)); }
+            }
+            (b, a)
+        })
+        .collect()
+}
+
+/// Returns (applies, over_cadence, max_ns, over_1ms) over the message list, timing each apply.
+fn ao_run(msgs: &[(AoSide, AoSide)], cadence_ns: u128) -> anyhow::Result<(u64, u64, u128, u64)> {
+    let mut book = Book::default();
+    let init: Vec<(String, String)> = (0..AO_BASE_LEVELS).map(|i| (format!("{}.00", 100_000 - i), "5.5".to_string())).collect();
+    let init_a: Vec<(String, String)> = (0..AO_BASE_LEVELS).map(|i| (format!("{}.00", 100_001 + i), "5.5".to_string())).collect();
+    book.load(&init, &init_a)?;
+    let (mut over, mut over_1ms, mut max_ns) = (0u64, 0u64, 0u128);
+    for (b, a) in msgs {
+        let t = Instant::now();
+        book.apply(b, a)?;
+        let ns = t.elapsed().as_nanos();
+        max_ns = max_ns.max(ns);
+        if ns > cadence_ns { over += 1; }
+        if ns > 1_000_000 { over_1ms += 1; }
+    }
+    Ok((msgs.len() as u64, over, max_ns, over_1ms))
+}
+
+fn applyover(seed: u64, messages: u64, cadence_ms: u64, out: &PathBuf) -> anyhow::Result<()> {
+    let started_at = utc_now();
+    let t0 = Instant::now();
+    let mut rng = SplitMix(seed);
+    let msgs = ao_messages(&mut rng, messages);
+    let (applies, over, _max_ns, over_1ms) = ao_run(&msgs, cadence_ms as u128 * 1_000_000)?;
+    // Raw timings (including the maximum) are machine-dependent and are not written, so the file reproduces.
+    let res = serde_json::json!({
+        "experiment": "applyover",
+        "params": { "seed": seed, "messages": messages, "burst_size": AO_BURST, "max_levels_per_message": AO_MAX_LEVELS,
+                    "cadence_ms": cadence_ms,
+                    "note": "real Book::apply timed per message with a monotonic clock; messages pre-built outside the timed region; only exceedance counts written" },
+        "applies": applies,
+        "over_cadence_count": over,
+        "over_1ms_count": over_1ms,
+        "provenance": {
+            "started_at": started_at, "seeds": [seed],
+            "command": format!("cargo run --locked -q --release -- applyover --seed {seed} --messages {messages} --cadence-ms {cadence_ms} --out {}", out.display()),
+            "hardware": format!("cpu-only, {} {}", std::env::consts::OS, std::env::consts::ARCH),
+            "wall_s": t0.elapsed().as_secs_f64().round(),
+            "data_sources": [
+                { "url": "in-process seeded synthetic stream (no external data)", "license": "MIT (own code)" }
+            ]
+        }
+    });
+    if let Some(dir) = out.parent() { std::fs::create_dir_all(dir)?; }
+    std::fs::write(out, serde_json::to_string_pretty(&res)? + "\n")?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
+    Ok(())
+}
+
 // ---- symbolrename: symbol-keyed recorder across a mid-stream rename ----
 
 const SR_MESSAGES: u64 = 1000;
@@ -3411,6 +3500,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Classcheck { seed, trials, out } => classcheck(seed, trials, &out),
         Cmd::Retentioncheck { seed, trials, out } => retentioncheck(seed, trials, &out),
         Cmd::Ordercheck { seed, trials, out } => ordercheck(seed, trials, &out),
+        Cmd::Applyover { seed, messages, cadence_ms, out } => applyover(seed, messages, cadence_ms, &out),
         Cmd::Tradeidcheck { seed, trials, out } => tradeidcheck(seed, trials, &out),
         Cmd::Symbolrename { seed, trials, out } => symbolrename(seed, trials, &out),
         Cmd::Unseqcheck { seed, trials, out } => unseqcheck(seed, trials, &out),
@@ -3710,6 +3800,21 @@ mod tests {
         ordercheck(7, 2, &out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert!(v.pointer("/summary/drop_lower_window8_match_count").is_some());
+        assert!(v.pointer("/provenance/started_at").is_some());
+    }
+
+    #[test]
+    fn applyover_counts_and_pointer_resolves() {
+        let msgs = ao_messages(&mut SplitMix(7), 500);
+        assert_eq!(msgs.len(), 500);
+        let (n, over, _, _) = ao_run(&msgs, 50_000_000).unwrap();
+        assert_eq!((n, over), (500, 0));
+        // a zero-ns cadence is exceeded by every apply
+        assert_eq!(ao_run(&msgs, 0).unwrap().1, 500);
+        let out = std::env::temp_dir().join(format!("bookrecord-ao-{}.json", std::process::id()));
+        applyover(7, 100, 50, &out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(v.pointer("/over_cadence_count").unwrap().as_u64(), Some(0));
         assert!(v.pointer("/provenance/started_at").is_some());
     }
 

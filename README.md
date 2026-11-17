@@ -213,3 +213,9 @@ Reproduce: `cargo run --locked -q --release -- tradeidcheck --seed 7 --trials 20
 `bookrecord symbolrename` renames a pair's symbol mid-stream (200 trials, 1000 messages, per-book sequence continuous). Result in `results/129-symbolrename.json`: a symbol-keyed recorder without an alias table held 2.0 books per trial after the cutover, one with an alias table held 1.0, and the sequence chain check raised 0 gap events in both arms. The stream is synthetic; this says nothing about real feeds.
 
 Reproduce: `cargo run --locked -q --release -- symbolrename --seed 7 --trials 200 --out results/129-symbolrename.json`
+
+## Apply time against the venue cadence (synthetic, seed 7)
+
+`bookrecord applyover` times the recorder's real `Book::apply` on each of a seeded synthetic stream of diff messages (up to 20 levels per message, messages built before timing starts) and counts applies slower than a cadence. Result in `results/260-applyover.json`: 0 of 200000 applies took longer than the 50 ms cadence (`over_cadence_count` 0) and 0 took longer than 1 ms. The pre-registered expectation (0) held. Only exceedance counts are written because raw timings depend on the machine. This times the in-memory apply only, not the network, JSON parsing or disk write, and the stream is synthetic; this says nothing about real feeds.
+
+Reproduce: `cargo run --locked -q --release -- applyover --seed 7 --messages 200000 --cadence-ms 50 --out results/260-applyover.json`

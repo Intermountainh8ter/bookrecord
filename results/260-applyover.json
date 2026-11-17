@@ -1,0 +1,29 @@
+{
+  "applies": 200000,
+  "experiment": "applyover",
+  "over_1ms_count": 0,
+  "over_cadence_count": 0,
+  "params": {
+    "burst_size": 50,
+    "cadence_ms": 50,
+    "max_levels_per_message": 20,
+    "messages": 200000,
+    "note": "real Book::apply timed per message with a monotonic clock; messages pre-built outside the timed region; only exceedance counts written",
+    "seed": 7
+  },
+  "provenance": {
+    "command": "cargo run --locked -q --release -- applyover --seed 7 --messages 200000 --cadence-ms 50 --out results/260-applyover.json",
+    "data_sources": [
+      {
+        "license": "MIT (own code)",
+        "url": "in-process seeded synthetic stream (no external data)"
+      }
+    ],
+    "hardware": "cpu-only, linux x86_64",
+    "seeds": [
+      7
+    ],
+    "started_at": "2026-11-17T19:04:12Z",
+    "wall_s": 1.0
+  }
+}
